@@ -20,20 +20,9 @@ ROOT-relative offset calculation, placement and alignment management, and
 link validation. This library automates those tasks and enables compile-time
 validation while preserving direct control of the DMA registers.
 
-## Features Overview
-
-- Combine heterogeneous LLI types and build multiple chains within one ROOT
-- Generate `CLLR.LA` automatically from the actual ROOT layout, avoiding manual offset calculations
-- Use `node_at<>` and `patch_jump()` to select link targets and create branches or loops
-- Validate the link structure followed by the DMA at compile time with `validate_root()`
-- Complete LLI construction, link editing, and validation with `constexpr` to minimize runtime work
-- Configure CLBAR and CLLR and start DMA with `dma_set_lli_start()` or `dma_start()`
-- Control the GPDMA registers directly without depending on STM32 HAL DMA or LL DMA APIs
-
 ## Contents
 
 - [What Problem Does This Solve?](#what-problem-does-this-solve)
-- [Features Overview](#features-overview)
 - [Current Scope](#current-scope)
 - [Recommended Construction Order](#recommended-construction-order)
 - [Bare-Metal Design Philosophy](#bare-metal-design-philosophy)
