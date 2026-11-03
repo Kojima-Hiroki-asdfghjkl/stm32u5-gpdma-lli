@@ -20,9 +20,20 @@ ROOT-relative offset calculation, placement and alignment management, and
 link validation. This library automates those tasks and enables compile-time
 validation while preserving direct control of the DMA registers.
 
+## Features Overview
+
+- Combine heterogeneous LLI types and build multiple chains within one ROOT
+- Generate `CLLR.LA` automatically from the actual ROOT layout, avoiding manual offset calculations
+- Use `node_at<>` and `patch_jump()` to select link targets and create branches or loops
+- Validate the link structure followed by the DMA at compile time with `validate_root()`
+- Complete LLI construction, link editing, and validation with `constexpr` to minimize runtime work
+- Configure CLBAR and CLLR and start DMA with `dma_set_lli_start()` or `dma_start()`
+- Control the GPDMA registers directly without depending on STM32 HAL DMA or LL DMA APIs
+
 ## Contents
 
 - [What Problem Does This Solve?](#what-problem-does-this-solve)
+- [Features Overview](#features-overview)
 - [Current Scope](#current-scope)
 - [Recommended Construction Order](#recommended-construction-order)
 - [Bare-Metal Design Philosophy](#bare-metal-design-philosophy)
@@ -427,26 +438,40 @@ For an STM32U575 linker-script example in this repository, see
 
 ## What `validate_root()` Checks
 
-`validate_root(ROOT)` checks the LLI layout and link structure inside the ROOT.
-It verifies that each CLLR is either a valid terminal value (`0`) or points to
-an existing LLI in the ROOT with the expected update flags and offset. It also
-checks ROOT-relative offset range and 4-byte alignment, including links
-changed by `patch_jump()`. Use it for compile-time validation, for example:
+`validate_root(ROOT)` answers a focused question: **can the DMA interpret this
+link structure?** It verifies that each CLLR is either a valid terminal value
+(`0`) or points to an existing LLI in the ROOT with the expected update flags.
+It also checks the ROOT-relative offset range and 4-byte alignment, including
+links changed by `patch_jump()`.
+
+For example, the following statement requires the link structure to be
+validated at compile time:
 
 ```cpp
 static_assert(validate_root(ROOT));
 ```
 
-It does **not** guarantee:
+Successful validation does **not** mean that the complete DMA configuration is
+correct or that the intended transfer is guaranteed to run. `validate_root()`
+is responsible for the consistency of the link structure and CLLRs. The
+caller must still confirm:
 
-- That the DMA transfer will complete successfully
-- That the ROOT is placed in memory accessible to the DMA
-- That linker placement or hardware configuration is correct
+- That the source and destination addresses and transfer widths meet the
+  peripheral requirements
+- That the correct DMA request line and trigger are selected
+- That the ROOT and transfer data are placed in memory accessible to the DMA
+- That linker placement, memory attributes, and cache management are
+  appropriate for the target device
 - That the link graph implements the application's intended state machine
-- That every node is reachable from the selected start node
+- That all required nodes are reachable from the selected start node
+
+In other words, `validate_root(ROOT) == true` means that the links are encoded
+in a form the DMA can follow. It does not prove that the DMA operation is
+correct for the application's purpose.
 
 `CLLR == 0` is treated as a valid terminal link. Detecting unintended
-termination or unreachable nodes requires separate validation.
+termination or unreachable nodes requires separate validation based on the
+application's requirements.
 
 ## Validation Status and Limitations
 
