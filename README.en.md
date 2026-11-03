@@ -110,13 +110,44 @@ generated links are initially `0 -> 1 -> 2 -> 3`; changing the final link to
 `3 -> 2` creates the loop.
 
 ```cpp
+struct LLI_12BSD_DMA_t
+{
+    uint32_t CTR1;
+    uint32_t CTR2;
+    uint32_t CBR1;
+    const uint32_t* CSAR;
+    uint32_t CDAR;
+    uint32_t CLLR;
+};
+
+static_assert(sizeof(void*) == sizeof(uint32_t));
+static_assert(sizeof(LLI_12BSD_DMA_t) == sizeof(LLI_12BSD_t));
+static_assert(offsetof(LLI_12BSD_DMA_t, CLLR) == offsetof(LLI_12BSD_t, CLLR));
+
+constexpr LLI_12BSD_DMA_t make_gpio_write(
+    const uint32_t& value,
+    uint32_t destination
+)
+{
+    return {
+        .CTR1 = 0x0002'4002,
+        .CTR2 = 0x010B'0200,
+        .CBR1 = 4,
+        .CSAR = &value,
+        .CDAR = destination,
+        .CLLR = 0
+    };
+}
+
+[[gnu::used]]
+[[gnu::section(".lli_data_0")]]
 constexpr auto ROOT = [] {
     auto root = make_lli_group(
         make_lli(
-            make_gpio_write(GPIO_HIGH_C, GPIOC_BSRR_ADDRESS),//0
-            make_gpio_write(GPIO_LOW_C, GPIOC_BSRR_ADDRESS), //1
-            make_gpio_write(GPIO_HIGH_D, GPIOD_BSRR_ADDRESS),//2
-            make_gpio_write(GPIO_LOW_D, GPIOD_BSRR_ADDRESS)  //3
+            make_gpio_write(GPIO_HIGH_C, GPIOC_BSRR_ADDRESS), //0
+            make_gpio_write(GPIO_LOW_C, GPIOC_BSRR_ADDRESS),  //1
+            make_gpio_write(GPIO_HIGH_D, GPIOD_BSRR_ADDRESS), //2
+            make_gpio_write(GPIO_LOW_D, GPIOD_BSRR_ADDRESS)   //3
         )
     );
 
