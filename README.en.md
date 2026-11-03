@@ -7,17 +7,28 @@
 This C++20 library builds STM32U575 GPDMA linked lists using `constexpr` and
 the type system.
 
-It did not start as a library project. It grew out of personal goals: making
-use of the STM32U575 GPDMA, safely combining heterogeneous LLIs, building loop
-structures, and minimizing runtime work. The library continues to be developed
-for use in the author's own projects.
+It did not start as a general-purpose library project. It began as a practical
+effort to use STM32U575 GPDMA, safely combine heterogeneous LLIs, build loops,
+and move list construction and validation to compile time. Manual linked-list
+construction can be error-prone; this library grew from solving that problem
+and continues to be developed for use in the author's own projects.
+
+## What Problem Does This Solve?
+
+Manually building GPDMA linked lists requires correct CLLR generation,
+ROOT-relative offset calculation, placement and alignment management, and
+link validation. This library automates those tasks and enables compile-time
+validation while preserving direct control of the DMA registers.
 
 ## Contents
 
+- [What Problem Does This Solve?](#what-problem-does-this-solve)
 - [Current Scope](#current-scope)
+- [Recommended Construction Order](#recommended-construction-order)
 - [Bare-Metal Design Philosophy](#bare-metal-design-philosophy)
   - [Design Goals](#design-goals)
   - [Runtime Behaviour](#runtime-behaviour)
+- [CLLR.LA: Hardware Investigation and Design Rationale](#cllrla-hardware-investigation-and-design-rationale)
 - [Verified Behaviour](#verified-behaviour)
 - [Hardware Example: GPIO Looping DMA](#hardware-example-gpio-looping-dma)
 - [What `validate_root()` Verifies](#what-validate_root-verifies)
@@ -26,6 +37,7 @@ for use in the author's own projects.
 - [Requirements](#requirements)
 - [Basic Example](#basic-example)
 - [LLI Placement and DMA Start](#lli-placement-and-dma-start)
+  - [ROOT and the CLBAR Address Space](#root-and-the-clbar-address-space)
 - [What `validate_root()` Checks](#what-validate_root-checks)
 - [Validation Status and Limitations](#validation-status-and-limitations)
   - [Example of Generated Runtime Code](#example-of-generated-runtime-code)
@@ -51,11 +63,26 @@ multiple chains, and loops. LLI construction, link editing, and ROOT validation
 can be evaluated as constant expressions. `dma_set_lli_start()` and
 `dma_start()` configure DMA registers at runtime.
 
+### Recommended Construction Order
+
+Links are patched after the ROOT is created. Use this order:
+
+1. Define chains with `make_lli()`.
+2. Create the ROOT with `make_lli_group()`, which generates the initial linear links.
+3. Change selected targets with `patch_jump()` as needed.
+4. Validate the link structure with `validate_root(ROOT)`.
+
+The recommended usage is to define ROOT as a `constexpr` object and validate
+it at compile time with `static_assert(validate_root(ROOT))`.
+
 ## Bare-Metal Design Philosophy
 
 This library targets bare-metal use of the STM32U5 GPDMA registers. It does not
 depend on STM32 HAL DMA APIs or STM32 LL DMA APIs. DMA request/trigger sources
-and peripheral configuration remain the application's responsibility.
+and peripheral configuration remain the application's responsibility,
+including channel configuration, request sources, priorities, and triggers.
+The library does not hide GPDMA features behind an abstraction: users retain
+direct control of LLI register fields such as CTR1/2/3 and CBR1/2.
 
 ### Design Goals
 
@@ -73,6 +100,27 @@ start configures CLBAR and CLLR and enables the channel. The inspected machine
 code for a specific build is documented in
 [Example of Generated Runtime Code](#example-of-generated-runtime-code).
 
+## CLLR.LA: Hardware Investigation and Design Rationale
+
+The initial design treated `CLLR.LA` as an offset relative to the current LLI
+and generated it from the structure offset to the next node. In a simple
+linear chain, this produced the same link delta for every node. The STM32U5
+reference manual also allowed an interpretation in which the next address is
+based on `CLBAR`, so the addressing rule was checked on real STM32U575 hardware
+using manually constructed LLIs.
+
+LLIs placed at ROOT-relative offsets `0x18`, `0x30`, and `0x48` executed as a
+linear chain when their CLLRs used those offsets. Changing links to form
+`B -> D` and `D -> C` also produced the expected loop. This result is
+consistent with `CLBAR + LA`, not `Current LLI + LA`. The library therefore
+generates `CLLR.LA` as an offset from the beginning of the ROOT.
+
+The API responsibilities follow this result: `make_lli()` defines a chain
+without generating CLLR values; `make_lli_group()` builds the ROOT and
+generates links using each node's actual position; `fixup_chain()` writes
+CLLR values using ROOT-relative offsets; and `patch_jump()` changes selected
+link targets.
+
 ## Verified Behaviour
 
 Hardware verification was performed by directly configuring the STM32U575
@@ -81,6 +129,7 @@ verified:
 
 - CLLR.LA is an offset from CLBAR, not relative to the current LLI address
 - Automatic CLLR generation based on the LLI layout within a ROOT
+- Construction and execution of chains containing heterogeneous LLIs
 - Generation of loop links with `patch_jump()` and their execution by DMA
 
 ## Hardware Example: GPIO Looping DMA
@@ -158,6 +207,22 @@ constexpr auto ROOT = [] {
 static_assert(validate_root(ROOT));
 ```
 
+The attributes on this ROOT declaration are GNU toolchain extensions.
+`[[gnu::used]]` tells the compiler to emit the variable; it does not determine
+its placement or guarantee alignment. `[[gnu::section(".lli_data_0")]]` puts
+the ROOT in a named input section, while the linker script determines its
+final address. On the linker side, `KEEP()` prevents matching sections from
+being removed, and `ALIGN(0x10000)` aligns the output section's start. To
+ensure the ROOT itself starts at that boundary, keep only that ROOT in its
+dedicated input section and verify its address in the linker map.
+
+In this example, `CSAR` holds the address of the value passed to
+`make_gpio_write()`. The referenced object must remain alive throughout the
+DMA transfer and reside in memory accessible to the GPDMA. Do not point it at
+a stack temporary or an object whose lifetime ends before the DMA finishes.
+Also ensure that the `CDAR` destination is valid for the device and DMA
+configuration.
+
 Configure the request/trigger source (such as the timer trigger) and stop the
 DMA channel before starting from the first node in the ROOT:
 
@@ -223,10 +288,14 @@ application's responsibility.
 ## Requirements
 
 - A C++20-compatible compiler (`concepts` and `consteval` are used)
-- A target with STM32U5 GPDMA; hardware operation has been verified on STM32U575
+- STM32U575 is the current development and hardware-verification target
 - STM32 device headers and GPDMA register definitions
 - A linker configuration that places each ROOT at a 64 KiB CLBAR boundary
 - Each ROOT must fit within 64 KiB
+
+Other STM32 devices with a compatible GPDMA linked-list architecture may work,
+but have not been verified. Operation on other STM32 families is not
+guaranteed.
 
 HAL DMA and LL DMA APIs are not required.
 
@@ -278,6 +347,15 @@ CLLR.LA is an offset from the 64 KiB boundary configured in CLBAR, not an
 offset relative to the current LLI address. If the ROOT is placed at boundary
 address `B`, an LLI at offset `O` within the ROOT is fetched from `B + O`.
 
+### ROOT and the CLBAR Address Space
+
+A ROOT represents one CLBAR address space. All LLI nodes referenced by its
+links must be in the same 64 KiB CLBAR window, and generated `CLLR.LA` values
+are offsets from the ROOT base. Use a separate linker section for each
+independent ROOT, for example `.lli_data_0`, `.lli_data_1`, and
+`.lli_data_ram`. Placing multiple independent ROOTs into one aligned block
+does not align each ROOT individually.
+
 ```text
 64 KiB boundary B (= CLBAR)
 |
@@ -314,17 +392,35 @@ ASSERT((_lli0_end - _lli0_start) <= 0x10000,
        "LLI block exceeds 64KB")
 ```
 
+In this repository's linker script, `KEEP(*(.lli_data_0*))` collects input
+sections whose names match `.lli_data_0*`. An ordinary `constexpr` variable
+does not enter this section just because it is `constexpr`; it would need an
+explicit matching section attribute (or another compiler/linker rule that
+places it in a matching input section). However, any matching input section
+is collected by the wildcard and can share the aligned output block. Keep
+each ROOT's matching input section dedicated to that ROOT, and check the
+linker map to confirm the ROOT symbol itself is 64 KiB aligned and the ROOT
+fits within its window. The block size assertion alone does not prove that
+every object inside the block is an independently aligned ROOT.
+
+The library is designed for `constexpr` use, but is not limited to it.
+`make_lli_group()` and `patch_jump()` can also be called at runtime to
+construct or modify a ROOT; CLLR generation and validation then happen at
+runtime as well. Completing the ROOT at compile time avoids runtime
+construction work and lets the finished LLI data be passed directly to DMA.
+For runtime-created ROOTs, the generated links and memory placement must meet
+the same structural assumptions. The application must also ensure that a
+ROOT in SRAM remains alive while DMA uses it, that CPU/DMA visibility and any
+required cache maintenance are handled, and that the ROOT is placed at a
+valid CLBAR boundary. `validate_root()` can participate in constant
+evaluation, but an ordinary function call does not force compile-time
+validation.
+
 `dma_start()` sets CLBAR and CLLR, then enables the channel. It does not
 configure DMA requests or triggers, request a stop, or handle status/error
-flags; configure those in the caller.
-
-This example places one ROOT block. Placing multiple ROOTs in the same block
-does not guarantee that each ROOT is individually aligned. For multiple ROOTs,
-use a dedicated input/output section for each ROOT (for example,
-`.lli_data_1`) and enforce each section's alignment and size in the linker
-script. `dma_start()` does not check placement; it derives CLBAR from the ROOT
-address. Verify DMA memory accessibility using the linker configuration and
-the target device documentation.
+flags; configure those in the caller. `dma_start()` also does not verify
+placement. Check the ROOT address and size in the linker map, and confirm from
+the target device documentation that DMA can access the selected memory.
 
 For an STM32U575 linker-script example in this repository, see
 [`../STM32U575xx_FLASH.ld`](../STM32U575xx_FLASH.ld).
@@ -333,8 +429,9 @@ For an STM32U575 linker-script example in this repository, see
 
 `validate_root(ROOT)` checks the LLI layout and link structure inside the ROOT.
 It verifies that each CLLR is either a valid terminal value (`0`) or points to
-an existing LLI in the ROOT with the expected update flags and offset. Use it
-for compile-time validation, for example:
+an existing LLI in the ROOT with the expected update flags and offset. It also
+checks ROOT-relative offset range and 4-byte alignment, including links
+changed by `patch_jump()`. Use it for compile-time validation, for example:
 
 ```cpp
 static_assert(validate_root(ROOT));
@@ -357,8 +454,9 @@ termination or unreachable nodes requires separate validation.
   Toolchain 14.3.1 in C++20 mode.
 - ROOT-relative CLLR.LA behavior and a specific GPIO DMA loop were verified on
   STM32U575 hardware.
-- Other STM32U5 devices, memory regions, and transfer configurations require
-  their own validation.
+- Devices other than STM32U575, memory regions, and transfer configurations
+  have not been verified. Other devices with the same GPDMA linked-list
+  architecture may work, but require individual validation.
 - A valid LLI layout does not guarantee correct transfer widths, addresses,
   request lines, or other DMA settings.
 - `make_lli_group()` and `validate_root()` can be used in constant
