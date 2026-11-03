@@ -85,6 +85,37 @@ STM32U575上でGPIO出力をLLIにし、リンク先を設定して次のDMAフ�
 この例では`make_lli_group()`にチェーンを1つだけ渡しているため、チェーン番号は`0`です。そのチェーン内のノード番号は`make_lli()`に渡した順に0始まりで割り当てられます。つまり、`node_at<0, 3>`は4番目のLLI（ノード3、PD11 LOW）、`node_at<0, 2>`は3番目のLLI（ノード2、PD11 HIGH）です。初期リンクは`0→1→2→3`で、最後のリンクを`3→2`に変更してループにしています。
 
 ```cpp
+struct LLI_12BSD_DMA_t
+{
+    uint32_t CTR1;
+    uint32_t CTR2;
+    uint32_t CBR1;
+    const uint32_t* CSAR;
+    uint32_t CDAR;
+    uint32_t CLLR;
+};
+
+static_assert(sizeof(void*) == sizeof(uint32_t));
+static_assert(sizeof(LLI_12BSD_DMA_t) == sizeof(LLI_12BSD_t));
+static_assert(offsetof(LLI_12BSD_DMA_t, CLLR) == offsetof(LLI_12BSD_t, CLLR));
+
+constexpr LLI_12BSD_DMA_t make_gpio_write(
+    const uint32_t& value,
+    uint32_t destination
+)
+{
+    return {
+        .CTR1 = 0x0002'4002,
+        .CTR2 = 0x010B'0200,
+        .CBR1 = 4,
+        .CSAR = &value,
+        .CDAR = destination,
+        .CLLR = 0
+    };
+}
+
+[[gnu::used]]
+[[gnu::section(".lli_data_0")]]
 constexpr auto ROOT = [] {
     auto root = make_lli_group(
         make_lli(
