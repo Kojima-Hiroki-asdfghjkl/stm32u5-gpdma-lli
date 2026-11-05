@@ -325,7 +325,9 @@ struct group_traits<lli_group<HEAD, TAIL...>>
     using tail_type = lli_group<TAIL...>;
 };
 
-// ROOT内のチェーン番号と、そのチェーン内のLLI番号を0始まりで表す。
+// ROOT内の位置を、0始まりのチェーン番号とチェーン内LLI番号で表す。
+// ROOT全体を通した絶対ノード番号ではない。
+// node_at<AbsoluteIndex>形式のフラットアドレッシングは提供しない。
 template<std::size_t ChainIndex, std::size_t NodeIndex>
 struct node_at
 {
@@ -717,13 +719,15 @@ concept GPDMAChannel =
     requires(CHANNEL& channel, uint32_t value) {
         channel.CLBAR = value;
         channel.CLLR = value;
-        channel.CCR |= value;
     };
 
-// ROOTの配置先をCLBAR/CLLRへ設定する。64KB境界配置はリンカ側で保証する。
+// 停止中のDMAチャネルへROOTの開始位置を設定する。
+// 本関数はチャネルを停止・開始しない。
+// CCR.EN == 1の場合、CLBAR/CLLRはロックされるため設定は反映されない。
+// 64KB境界配置はリンカ側で保証する。
 template<typename POSITION, GPDMAChannel CHANNEL, typename... CHAINS>
     requires ValidNodePosition<POSITION, lli_group<CHAINS...>>
-inline void dma_set_lli_start(
+inline void load_lli(
     CHANNEL& channel,
     const lli_group<CHAINS...>& root
 )
@@ -734,19 +738,6 @@ inline void dma_set_lli_start(
     channel.CLBAR =
         static_cast<uint32_t>(root_address);
     channel.CLLR = start_cllr<POSITION>(root);
-}
-
-// LLI開始位置を設定してチャネルを有効化する。
-// 停止要求やトリガ設定は呼び出し側で行う。
-template<typename POSITION, GPDMAChannel CHANNEL, typename... CHAINS>
-    requires ValidNodePosition<POSITION, lli_group<CHAINS...>>
-inline void dma_start(
-    CHANNEL& channel,
-    const lli_group<CHAINS...>& root
-)
-{
-    dma_set_lli_start<POSITION>(channel, root);
-    channel.CCR |= 0x00000001U;
 }
 
 // チェーン内を再帰し、次のLLIへのCLLRを設定する。
