@@ -337,9 +337,48 @@ constexpr auto ROOT = [] {
 static_assert(validate_root(ROOT));
 ```
 
-The chain and node indices in `node_at<ChainIndex, NodeIndex>` are zero-based.
-`make_lli()` defines a chain, and `make_lli_group()` generates linear-link CLLR
-values using each LLI's actual offset within the ROOT.
+### `node_at<>` Indexing Model
+
+`node_at<ChainIndex, NodeIndex>` identifies a node within a ROOT using two
+zero-based indices:
+
+- `ChainIndex`: the position of the chain passed to `make_lli_group()`
+- `NodeIndex`: the position of the node within that chain
+
+`node_at<>` is not an absolute node index across the entire ROOT.
+
+For example:
+
+```cpp
+constexpr auto ROOT = make_lli_group(
+    SPI_REINIT, // chain 0: node 0, node 1
+    SPI_TX_DAT, // chain 1: node 0
+    GPIO_HI     // chain 2: node 0
+);
+```
+
+The following positions are valid:
+
+```cpp
+node_at<0, 0> // First node of SPI_REINIT
+node_at<0, 1> // Second node of SPI_REINIT
+node_at<1, 0> // First node of SPI_TX_DAT
+node_at<2, 0> // First node of GPIO_HI
+```
+
+The following positions are invalid:
+
+```cpp
+node_at<0, 2> // Chain 0 has no third node
+node_at<0, 3> // This does not mean the fourth node in the ROOT
+```
+
+`make_lli()` defines one chain, while `make_lli_group()` stores multiple chains
+in a ROOT. `patch_jump<FROM, TO>()` and `dma_start<POSITION>()` use this pair of
+chain and in-chain node indices.
+
+The current API does not provide flat ROOT-wide addressing such as
+`node_at<AbsoluteIndex>`.
 
 ## LLI Placement and DMA Start
 

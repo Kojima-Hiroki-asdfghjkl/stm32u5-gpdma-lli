@@ -10,20 +10,9 @@
 
 GPDMAのLLIを手作業で構築すると、CLLR生成、ROOT内オフセット計算、配置・アラインメント管理、リンク先の整合性確認が必要です。本ライブラリはこれらを自動化し、コンパイル時検証を可能にしながら、DMAレジスタを直接設定する制御性を保ちます。
 
-## 主な機能
-
-- 異なる形式のLLIを組み合わせて、1つのROOT内に複数のチェーンを構築
-- ROOT内の実際の配置から`CLLR.LA`を自動生成し、手作業のオフセット計算を削減
-- `node_at<>`と`patch_jump()`でリンク先を指定し、分岐やループを構成
-- `validate_root()`で、DMAがたどるリンク構造をコンパイル時に検証
-- `constexpr`でLLIの構築・リンク編集・検証を完了し、実行時処理を最小化
-- `dma_set_lli_start()`または`dma_start()`でCLBARとCLLRを設定してDMAを開始
-- HAL DMA APIやLL DMA APIに依存せず、GPDMAレジスタを直接制御
-
 ## 目次
 
 - [このライブラリが解決すること](#このライブラリが解決すること)
-- [主な機能](#主な機能)
 - [現在の機能](#現在の機能)
 - [推奨する構築手順](#推奨する構築手順)
 - [ベアメタル設計方針](#ベアメタル設計方針)
@@ -266,7 +255,44 @@ constexpr auto ROOT = [] {
 static_assert(validate_root(ROOT));
 ```
 
-`node_at<ChainIndex, NodeIndex>`の番号はどちらも0始まりです。`make_lli()`はチェーン定義を作り、`make_lli_group()`がROOT内の配置に基づいて直線リンクのCLLRを生成します。
+### `node_at<>`のインデックス体系
+
+`node_at<ChainIndex, NodeIndex>`は、ROOT内のノード位置を次の2段階で表します。
+
+- `ChainIndex`: `make_lli_group()`へ渡したチェーンの番号
+- `NodeIndex`: 対象チェーン内でのノード番号
+
+どちらも0始まりです。`node_at<>`はROOT全体を通した絶対ノード番号ではありません。
+
+例えば、次のROOTを定義した場合:
+
+```cpp
+constexpr auto ROOT = make_lli_group(
+    SPI_REINIT, // chain 0: node 0, node 1
+    SPI_TX_DAT, // chain 1: node 0
+    GPIO_HI     // chain 2: node 0
+);
+```
+
+有効な位置指定は次のとおりです。
+
+```cpp
+node_at<0, 0> // SPI_REINITの先頭ノード
+node_at<0, 1> // SPI_REINITの2番目のノード
+node_at<1, 0> // SPI_TX_DATの先頭ノード
+node_at<2, 0> // GPIO_HIの先頭ノード
+```
+
+次の指定は無効です。
+
+```cpp
+node_at<0, 2> // chain 0に3番目のノードは存在しない
+node_at<0, 3> // ROOT全体の4番目のノードという意味にはならない
+```
+
+`make_lli()`は1つのチェーンを定義し、`make_lli_group()`は複数のチェーンをROOTへ格納します。`patch_jump<FROM, TO>()`および`dma_start<POSITION>()`では、このチェーン番号とチェーン内ノード番号の組を使用します。
+
+`node_at<AbsoluteIndex>`のようなROOT全体のフラットアドレッシングは、現在のAPIにはありません。
 
 ## LLI配置とDMA開始
 
