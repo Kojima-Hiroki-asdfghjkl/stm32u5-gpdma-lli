@@ -1,12 +1,18 @@
-# STM32U575 Self-Modifying GPDMA Descriptor Dispatch
+# STM32U575 Static GPDMA Descriptor Dispatch
 
 [English](#english) | [日本語](#日本語)
 
-> **Status: v2.0.0-alpha.1 development record**
+> **Status: v2.0.0-beta.1 development record**
 >
-> This directory preserves the hardware-verified prototype used to explore
-> self-modifying descriptor dispatch for the v2 design. It is not a stable API,
-> a minimal example, or a reusable board-support package.
+> This directory preserves the hardware-verified beta.1 implementation of the
+> STM32U575 self-modifying GPDMA descriptor dispatcher. The implementation now
+> uses named Program/List/Node positions, automatic same-Program List linking,
+> static descriptor-ring initialization, and link-time completion of selector
+> addresses.
+>
+> The observed DMA and SPI behavior is intentionally unchanged from
+> v2.0.0-alpha.1. beta.1 changes the construction API and initialization model,
+> not the verified transfer sequence.
 
 ---
 
@@ -14,11 +20,12 @@
 
 ## Overview
 
-This experiment demonstrates a self-modifying STM32U575 GPDMA linked-list
-sequence built on top of the v1.1.0 infrastructure.
+This example demonstrates a self-modifying STM32U575 GPDMA linked-list
+sequence using the v2.0.0-beta.1 library model.
 
-After the CPU loads the entry node and enables GPDMA1 Channel 0, GPDMA performs
-the following sequence without further CPU descriptor selection:
+After the CPU prepares the channel register file, loads the named entry point,
+and enables GPDMA1 Channel 0, GPDMA repeatedly performs the following sequence
+without further CPU descriptor selection:
 
 1. Reads one descriptor from a descriptor ring.
 2. Rewrites the selector state for the next descriptor.
@@ -28,59 +35,339 @@ the following sequence without further CPU descriptor selection:
 6. Updates the GPIO control signal.
 7. Returns to the selector and repeats.
 
-The hardware-verified descriptor sequence is:
+The descriptor sequence reproduced during the beta.1 hardware test is unchanged
+from alpha.1:
 
 | Descriptor | Source offset | Length | Observed MOSI data |
 |---:|---:|---:|---|
-| 0 | `TEST_DATA + 10` | 10 bytes | `10-19` |
-| 1 | `TEST_DATA + 0` | 10 bytes | `0-9` |
-| 2 | `TEST_DATA + 40` | 10 bytes | `40-49` |
-| 3 | `TEST_DATA + 12` | 10 bytes | `12-21` |
+| 0 | `DUMMY + 10` | 10 bytes | `10-19` |
+| 1 | `DUMMY + 0` | 10 bytes | `0-9` |
+| 2 | `DUMMY + 40` | 10 bytes | `40-49` |
+| 3 | `DUMMY + 12` | 10 bytes | `12-21` |
 
 After descriptor 3, the ring returns to descriptor 0.
 
+`DUMMY` is the beta.1 name of the sequential 256-byte test data corresponding
+to `TEST_DATA` in the alpha.1 experiment.
+
+## What changed from alpha.1
+
+The DMA behavior and observed SPI sequence are the same as alpha.1. beta.1
+changes how the graph is described and initialized.
+
+### Added in beta.1
+
+- Named logical positions using:
+
+  ```cpp
+  node_at<ProgramTag, ListTag, NodeIndex>
+  ```
+
+- List boundary positions using:
+
+  ```cpp
+  list_entry<ProgramTag, ListTag>
+  list_tail<ProgramTag, ListTag>
+  ```
+
+- Compile-time Program/List tags with no runtime storage cost.
+- Automatic linking between adjacent Lists that have the same Program tag.
+- No automatic link across a Program boundary.
+- Explicit link override through `patch_jump<From, To>()`.
+- Explicit termination through `patch_end<Position>()`.
+- Templated descriptor steps through `descriptor_step<ExecutorImage>`.
+- Automatic derivation of selector/executor offsets and the rewrite window.
+- Typed initial descriptor selection through `start_at<N>`.
+- Static descriptor-ring construction with `constinit`.
+- Static selector `CSAR` and `CDAR` initialization through ELF relocation.
+- Startup loading of the completed `.SRAM2` image from Flash.
+
+### Removed from the normal runtime path
+
+- Runtime queue construction.
+- Runtime node linking.
+- Runtime `connectSelectorAddresses()`.
+- The provisional `constructor(101)` SRAM2 copy routine.
+
 ## Design objective
 
-The long-term design objective of the library is:
+The v2 design targets:
 
 - strict structural type safety;
-- fully static initialization of GPDMA node graphs;
+- fully static construction of GPDMA node graphs;
+- named Program/List/Node positions instead of physical chain numbers;
 - no runtime queue construction;
 - no runtime node linking;
-- runtime execution limited to loading the entry node and enabling DMA.
-
-The alpha.1 prototype still performs two startup assignments for the selector's
-`CSAR` and `CDAR`. These assignments are expected to be replaced by link-time
-relocation in a later v2 revision.
+- runtime execution limited to channel preparation, entry loading, and DMA
+  enablement.
 
 Copying the completed `.SRAM2` load image from Flash to its SRAM2 execution
 address is treated as image loading, not runtime graph construction.
 
-## Prototype structure
+## Named Program/List/Node model
+
+Program and List names are compile-time type tags. They do not add fields to the
+ROOT image.
+
+```cpp
+namespace SpiGpioProgram
+{
+    struct Program;
+    struct InitialDataLength;
+    struct Dispatch;
+
+    using Entry = list_entry<Program, InitialDataLength>;
+    using DispatchSelector = list_entry<Program, Dispatch>;
+    using DispatchExecutor = list_tail<Program, Dispatch>;
+}
+```
+
+The library resolves each logical position to:
+
+- the physical List index;
+- the Node index within the List;
+- the ROOT-relative byte offset;
+- the target LLI type;
+- the required CLLR update flags.
+
+This prevents physical List insertion or reordering from renumbering every
+public jump target.
+
+## Automatic List linking
+
+Nodes inside each List are linked in declaration order by `make_lli()`.
+
+Adjacent Lists are linked automatically only when both Lists use the same
+Program tag.
+
+```text
+Program A / List 0 tail -> Program A / List 1 entry
+Program A / List 1 tail -> Program A / List 2 entry
+Program A / final List tail -> 0
+
+Program A / final List tail -X-> Program B / first List entry
+```
+
+Program boundaries are therefore terminal by default. Cross-Program execution
+must be requested explicitly:
+
+```cpp
+patch_jump<ProgramA::Exit, ProgramB::Entry>(root);
+```
+
+The current SPI/GPIO graph requires only two explicit overrides:
+
+1. The initial SPI-start List jumps directly to the dispatcher.
+2. The final GPIO-low List jumps back to the normal loop entry.
+
+All other same-Program List transitions are generated automatically.
+
+## Descriptor structure
 
 The selector transfers exactly 32 bytes from the active descriptor into the
 SRAM2 ROOT image:
 
 | Descriptor field | Destination |
 |---|---|
-| `nextSelectorSource` | `selector.CSAR` |
-| `nextSelectorDestination` | `selector.CDAR` |
-| `nextSelectorLink` | `selector.CLLR` |
+| next selector source | `selector.CSAR` |
+| next selector destination | `selector.CDAR` |
+| next selector link | `selector.CLLR` |
 | `executor.CTR1` | `executor.CTR1` |
 | `executor.CTR2` | `executor.CTR2` |
 | `executor.CBR1` | `executor.CBR1` |
 | `executor.CSAR` | `executor.CSAR` |
 | `executor.CDAR` | `executor.CDAR` |
 
-`executor.CLLR` is deliberately outside the rewrite window. The executor
-therefore retains its statically generated link to the following node.
+`executor.CLLR` remains outside the rewrite window. The executor therefore
+retains its statically generated link to the following List.
 
-The implementation checks the relevant object sizes, offsets, alignment, and
-rewrite-window size with `static_assert`.
+For v2.0.0-beta.1, hardware validation is limited to:
+
+```cpp
+DESC_12BSD_t
+```
+
+The descriptor implementation is already parameterized by executor-image type,
+but additional partial and 2D images are outside the v2.0.0 scope.
+
+## Automatic dispatcher layout
+
+`descriptor_dispatch_layout` derives the following information from the ROOT
+type and the named selector/executor positions:
+
+- selector ROOT offset;
+- executor ROOT offset;
+- rewrite-window beginning;
+- rewrite-window end and size;
+- selector-to-executor CLLR;
+- descriptor-step type.
+
+The application no longer defines physical constants such as:
+
+```text
+DESCRIPTOR_CHAIN_OFFSET
+SELECTOR_OFFSET
+EXECUTOR_OFFSET
+DESCRIPTOR_PATCH_BEGIN
+DESCRIPTOR_PATCH_END
+SELECTOR_TO_EXECUTOR_CLLR
+```
+
+The implementation verifies that the derived rewrite-window size exactly
+matches `sizeof(descriptor_step<DESC_12BSD_t>)`.
+
+## Static descriptor ring
+
+The descriptor ring is a `constinit` object containing descriptor-to-descriptor
+references and references to the SRAM execution ROOT.
+
+```cpp
+constinit descriptor_step_t descList[4] = {
+    descriptor_dispatch_t::make_step(
+        &descList[1], SPI_GPIO_ROOT, test_spi_dat1),
+    descriptor_dispatch_t::make_step(
+        &descList[2], SPI_GPIO_ROOT, test_spi_dat2),
+    descriptor_dispatch_t::make_step(
+        &descList[3], SPI_GPIO_ROOT, test_spi_dat3),
+    descriptor_dispatch_t::make_step(
+        &descList[0], SPI_GPIO_ROOT, test_spi_dat4)
+};
+```
+
+The initial descriptor is selected with `start_at<N>`.
+
+```cpp
+start_at<0>{}
+```
+
+Changing `N` selects another descriptor as the initial ring entry without a
+runtime selector patch.
+
+## Static selector connection
+
+alpha.1 connected selector `CSAR` and `CDAR` with two startup assignments.
+beta.1 completes those fields as part of static initialization.
+
+```cpp
+[[gnu::used]]
+[[gnu::section(".SRAM2")]]
+constinit root_t SPI_GPIO_ROOT = [] {
+    auto root = SPI_GPIO_ROOT_TEMPLATE;
+
+    descriptor_dispatch_t::initialize_selector(
+        root,
+        SPI_GPIO_ROOT,
+        descList,
+        start_at<0>{}
+    );
+
+    return root;
+}();
+```
+
+The compiler emits statically initialized data and relocation records. The
+linker resolves the final addresses after placing the descriptor ring and SRAM2
+execution ROOT.
+
+No descriptor or selector connection function is called from `userMain()`.
+
+## SRAM2 execution image
+
+The beta.1 hardware-test application places the writable ROOT in an initialized
+`.SRAM2` output section:
+
+```ld
+.SRAM2 :
+{
+    . = ALIGN(8);
+    __sram2_start__ = .;
+
+    KEEP(*(.SRAM2))
+    KEEP(*(.SRAM2.*))
+
+    . = ALIGN(8);
+    __sram2_end__ = .;
+} > SRAM2 AT > ROM
+
+__sram2_load__ = LOADADDR(.SRAM2);
+```
+
+`AT > ROM` gives the SRAM2 execution image a Flash load image. The application
+Reset Handler copies the range beginning at `__sram2_load__` to
+`__sram2_start__ .. __sram2_end__` immediately after `SystemInit()` and before
+the ordinary C/C++ runtime initialization:
+
+```text
+SystemInit()
+    -> copy the completed .SRAM2 image from Flash to SRAM2
+    -> initialize .data/.tdata
+    -> zero .bss/.tbss
+    -> __libc_init_array()
+    -> main()
+```
+
+This linker and startup arrangement is an application-side integration
+condition used for the beta.1 hardware test, not a requirement to adopt the
+test application's complete linker script. Integrate the initialized SRAM2
+section and its startup copy into the target application's existing memory
+layout.
+
+## Runtime responsibilities
+
+`load_lli()` only configures the entry link:
+
+- `CLBAR`
+- `CLLR`
+
+The caller remains responsible for:
+
+- stopping or resetting the channel;
+- preparing the internal channel register file used as LLI0;
+- setting `CBR1.BNDT = 0` when a null LLI0 is required;
+- configuring CCR options;
+- enabling the channel.
+
+The current example uses:
+
+```cpp
+GPDMA1_Channel0->CCR |= 0x0000'0002u; // RESET
+GPDMA1_Channel0->CBR1 = 0;             // BNDT = 0, null LLI0
+
+load_lli<SpiGpioProgram::Entry>(
+    *GPDMA1_Channel0,
+    SPI_GPIO_ROOT
+);
+
+GPDMA1_Channel0->CCR |= 0x0000'0001u; // EN
+```
+
+`CCR.RESET` resets the FIFO, internal state, `EN`, and `SUSP`. It does not clear
+`CBR1`, `CSAR`, or `CDAR` to zero.
+
+## Same observed behavior as alpha.1
+
+beta.1 was tested on the STM32U575 hardware and produced the same descriptor
+order, MOSI data, and GPIO behavior as alpha.1.
+
+The following remain unchanged:
+
+- GPDMA1 Channel 0;
+- SPI1 unidirectional transmit mode;
+- four-descriptor ring order;
+- 10-byte transfer length per descriptor;
+- source offsets `10`, `0`, `40`, and `12`;
+- GPIO control waveform;
+- executor rewrite behavior;
+- descriptor 3 to descriptor 0 wrap;
+- CPU-free descriptor selection after DMA startup.
+
+The capture files preserved here were recorded for alpha.1. They document the
+expected externally observable sequence, which was reproduced during the beta.1
+hardware test. They are not newly recorded beta.1 measurements.
 
 ## Verified platform configuration
 
-The captured result was produced with the following configuration:
+The reference capture was produced with:
 
 - MCU: STM32U575;
 - GPDMA: GPDMA1 Channel 0;
@@ -89,65 +376,63 @@ The captured result was produced with the following configuration:
 - system clock: 80 MHz;
 - SPI1 SCK: PA5;
 - SPI1 MOSI: PA7;
-- sequence-control output shown in the capture: PC6;
+- sequence-control output: PC6;
 - ROOT execution image: SRAM2;
-- initial ROOT image: loaded from Flash at startup.
+- initial ROOT image: loaded from Flash during reset startup.
 
 `original_init.hpp` preserves the initialization code from the original test
-application. It contains initialization unrelated to this GPDMA experiment and
-is included to preserve the actual hardware-validation environment. It is not a
-minimal initialization example or a reusable platform layer.
+application. It includes initialization unrelated to this experiment and is not
+a minimal reusable platform layer.
 
-## Header snapshot
+## Source snapshot
 
-The files under `include/` are the exact header snapshot used for the
-v2.0.0-alpha.1 hardware validation:
+The development-record snapshot contains:
 
-- `gpdma_lli.hpp`
-- `gpdma_lli_t.hpp`
-- `stm32u575_spi_t.hpp`
+- `include/gpdma_lli.hpp`
+- `include/gpdma_lli_t.hpp`
+- `include/stm32u575_spi_t.hpp`
+- `v2_0_0_alpha_1_user_main.cpp`
+- `v2_0_0_beta_1_user_main.cpp`
+- `original_init.hpp`
+- `example/startup_stm32u575xx.s`
+- `example/STM32U575xx_FLASH.ld`
 
-The snapshot is based on v1.1.0 and contains experimental additions required by
-this prototype, including `DESC_12BSD_t` and the STM32U575 SPI-specific type
-support.
+The versioned `user_main` files preserve the application code used for each
+development stage. The beta.1 hardware test uses
+`v2_0_0_beta_1_user_main.cpp`.
 
-These files are development-record dependencies. They are not the stable public
-headers and are not intended to be installed together with the repository-level
-headers.
+The files in `example/` show the startup and linker integration required to
+load the initialized `.SRAM2` execution image from Flash. They are integration
+references rather than a complete standalone example.
+
+The SPI-specific code is an experimental application and is not part of the
+generic GPDMA LLI library API.
 
 ## Logic capture
 
-The `capture/` directory contains the measurement data used to verify the
-prototype.
+The files in `capture/` are the alpha.1 measurements described above. They are
+retained as the reference record for the sequence reproduced by beta.1.
 
 ### Files
 
 - `capture/v2_0_0_alpha_capture.sal`  
-  Original Saleae Logic 2 capture. Open this file in Logic 2 to inspect timing,
-  zoom into individual transfers, and change the analyzer presentation.
+  Original Saleae Logic 2 capture.
 
 - `capture/v2_0_0_alpha_capture.csv`  
-  Exported SPI analyzer data. It records the decoded transfer data and is useful
-  for text inspection, scripting, and checking the repeated descriptor order.
+  Exported SPI analyzer data.
 
 - `capture/v2_0_0_alpha_capture.png`  
-  Representative Logic 2 screenshot. The waveform pane shows one 10-byte SPI
-  transfer while PC6 is low. The Data table on the right shows the wider cyclic
-  descriptor sequence.
+  Representative Logic 2 screenshot.
 
-### Signals visible in the screenshot
+### Signals
 
 | Logic 2 row | Signal | Purpose |
 |---|---|---|
 | D1 / RB2 | SPI clock | SPI1 SCK |
 | D0 / RB3 | SPI MOSI | SPI1 transmitted data |
-| D3 / PC6 | Control output | Active-low transfer window shown in the capture |
+| D3 / PC6 | Control output | Active-low transfer window |
 
-The other displayed channels are not used to validate this experiment.
-
-### What the capture proves
-
-The analyzer table shows the following decoded MOSI sequence:
+### Expected and hardware-reproduced MOSI sequence
 
 ```text
 10 11 12 13 14 15 16 17 18 19
@@ -157,21 +442,18 @@ The analyzer table shows the following decoded MOSI sequence:
 10 11 12 ...
 ```
 
-This confirms all of the following:
+The alpha.1 capture confirms:
 
 - each executor transfer sends 10 bytes;
 - descriptor order is preserved;
 - descriptor 3 links back to descriptor 0;
 - the selector advances the descriptor ring;
-- the executor node is rewritten successfully;
-- the sequence continues after startup without CPU descriptor selection.
-
-The screenshot displays one transfer in detail in the waveform pane. The full
-cycle is visible in the Logic 2 Data table and in the CSV export.
+- the executor image is rewritten successfully;
+- descriptor selection continues without CPU intervention.
 
 ## Important hardware-specific limitation
 
-This prototype uses an observed SPI RX DMA request near TXC as the completion
+This experiment uses an observed SPI RX DMA request near TXC as the completion
 request for the SPI-disable node.
 
 On the tested STM32U575 configuration, one SPI RX DMA request was observed near
@@ -179,7 +461,7 @@ the completion of the first unidirectional transmission after enabling SPI.
 This behavior is not documented or guaranteed by the reference manual or data
 sheet.
 
-Revalidate this behavior when changing any of the following:
+Revalidate when changing:
 
 - MCU or silicon revision;
 - SPI direction or FIFO configuration;
@@ -187,38 +469,55 @@ Revalidate this behavior when changing any of the following:
 - DMA request configuration;
 - clock configuration.
 
-## Alpha.1 limitations
+## beta.1 limitations
 
-- The implementation is layered on top of the v1.1.0 node/group infrastructure.
-- The descriptor-dispatch API is not final.
-- `DESC_12BSD_t` is an experimental descriptor type used by this prototype.
-- Selector `CSAR` and `CDAR` are connected with two startup assignments.
-- `.SRAM2` loading temporarily uses `constructor(101)`.
+- The Program/List/Node public API is still under development.
+- For v2.0.0-beta.1, hardware validation is limited to `DESC_12BSD_t`
+  descriptor executor images.
+- `executor.CLLR` is not part of the descriptor rewrite window.
+- Program/List tag duplication checks are not complete.
+- Invalid `list_tail` diagnostics may still produce deep template errors.
+- Optimization and LTO regression testing is not yet complete.
 - The platform initialization is preserved from the original application and
   is not minimal.
-- The SPI completion mechanism depends on undocumented observed behavior.
+- SPI completion depends on undocumented observed hardware behavior.
+
+## Remaining work before the release candidate
+
+- Complete Program/List tag duplication checks.
+- Improve invalid `list_tail` diagnostics.
+- Finalize the Program/List public API.
+- Add negative compile tests for named positions and dispatch layout.
+- Test `-O0`, `-Og`, `-O2`, `-O3`, `-Os`, `-O3 -flto`, and `-Os -flto`.
+- Verify `.SRAM2` VMA/LMA and all relevant relocations for representative
+  builds.
+- Confirm that no ROOT-specific dynamic initializer is generated.
+- Repeat representative hardware tests after API freeze.
 
 ## Directory contents
 
 ```text
 stm32u575_spi_descriptor_dispatch/
-├── README.md
-├── v2_0_0_alpha1_user_main.cpp
-├── original_init.hpp
+├── capture/
+│   ├── v2_0_0_alpha_capture.csv
+│   ├── v2_0_0_alpha_capture.png
+│   └── v2_0_0_alpha_capture.sal
+├── example/
+│   ├── startup_stm32u575xx.s
+│   └── STM32U575xx_FLASH.ld
 ├── include/
-│   ├── gpdma_lli.hpp
 │   ├── gpdma_lli_t.hpp
+│   ├── gpdma_lli.hpp
 │   └── stm32u575_spi_t.hpp
-└── capture/
-    ├── v2_0_0_alpha_capture.sal
-    ├── v2_0_0_alpha_capture.csv
-    └── v2_0_0_alpha_capture.png
+├── original_init.hpp
+├── README.md
+├── v2_0_0_alpha_1_user_main.cpp
+└── v2_0_0_beta_1_user_main.cpp
 ```
 
-This directory is a development record. The implementation and duplicated
-header snapshot may be removed from the latest branch after the behavior is
-incorporated into the final v2 API. The files remain available from the
-`v2.0.0-alpha.1` tag and Git history.
+This directory is a development record. The implementation snapshot may be
+removed from the latest branch after the behavior is incorporated into the
+final v2 public API. The beta.1 tag and Git history preserve this revision.
 
 ---
 
@@ -226,16 +525,19 @@ incorporated into the final v2 API. The files remain available from the
 
 ## 概要
 
-このディレクトリは、v1.1.0の基盤上で構築したSTM32U575 GPDMAの
-自己書き換え型descriptor dispatchについて、実機で成立を確認した時点の
+このディレクトリは、v2.0.0-beta.1時点のSTM32U575 GPDMA自己書き換え型
+descriptor dispatcherについて、実機確認済みのコードと構築方式を保存する
 開発記録です。
 
-安定版API、最小実行例、再利用可能なBSPとして公開するものではありません。
-v2設計へ取り込む機構の技術検証と、実機確認時のコードおよび測定結果を保存する
-ことを目的としています。
+beta.1では、Program/List/Nodeの名前付き位置、同一Program内Listの自動接続、
+descriptor ringの静的初期化、selectorアドレスのリンク時解決を導入しました。
 
-CPUが開始ノードをGPDMA1 Channel 0へロードしてチャネルを有効化した後は、
-CPUがdescriptorを選択することなく、GPDMAが以下の処理を繰り返します。
+**DMAとSPIの観測動作はv2.0.0-alpha.1と同一です。** beta.1で変更したのは
+グラフの構築APIと初期化方式であり、descriptor順序、SPI転送内容、GPIO波形、
+自己書き換えシーケンスの動作仕様は変更していません。
+
+CPUがチャネルレジスタと開始位置を準備し、GPDMA1 Channel 0を有効化した後は、
+GPDMAがCPUによるdescriptor選択なしで次を繰り返します。
 
 1. descriptor ringからdescriptorを1件読み込む。
 2. selectorを次のdescriptorへ進める。
@@ -243,62 +545,334 @@ CPUがdescriptorを選択することなく、GPDMAが以下の処理を繰り�
 4. SPI転送を実行する。
 5. 転送完了後にSPIを無効化する。
 6. GPIO制御信号を更新する。
-7. selectorへ戻って次のdescriptorを処理する。
+7. selectorへ戻り、次のdescriptorを処理する。
 
-実機で確認したdescriptorの順序は以下です。
+beta.1の実機試験で再現したdescriptor順序は、alpha.1から変更ありません。
 
 | Descriptor | 送信元オフセット | 長さ | 観測したMOSIデータ |
 |---:|---:|---:|---|
-| 0 | `TEST_DATA + 10` | 10バイト | `10-19` |
-| 1 | `TEST_DATA + 0` | 10バイト | `0-9` |
-| 2 | `TEST_DATA + 40` | 10バイト | `40-49` |
-| 3 | `TEST_DATA + 12` | 10バイト | `12-21` |
+| 0 | `DUMMY + 10` | 10バイト | `10-19` |
+| 1 | `DUMMY + 0` | 10バイト | `0-9` |
+| 2 | `DUMMY + 40` | 10バイト | `40-49` |
+| 3 | `DUMMY + 12` | 10バイト | `12-21` |
 
 Descriptor 3の実行後はdescriptor 0へ戻ります。
 
+`DUMMY`は、alpha.1の`TEST_DATA`に相当する0から255までの連続した
+256バイトのテストデータです。
+
+## alpha.1からの変更点
+
+DMAの実行結果はalpha.1と同じですが、構築方法をv2設計へ移行しました。
+
+### beta.1で追加したもの
+
+- 次の形式による名前付き論理位置：
+
+  ```cpp
+  node_at<ProgramTag, ListTag, NodeIndex>
+  ```
+
+- List境界位置：
+
+  ```cpp
+  list_entry<ProgramTag, ListTag>
+  list_tail<ProgramTag, ListTag>
+  ```
+
+- 実行時領域を消費しないProgram/List型タグ。
+- 同一Programに属する隣接Listの自動接続。
+- Program境界では自動接続しない安全な既定動作。
+- `patch_jump<From, To>()`による接続上書き。
+- `patch_end<Position>()`による明示終端。
+- `descriptor_step<ExecutorImage>`によるdescriptor stepのテンプレート化。
+- selector/executorオフセットと書き換え範囲の自動導出。
+- `start_at<N>`による初期descriptor指定。
+- `constinit`によるdescriptor ringの静的構築。
+- ELFリロケーションによるselector `CSAR`/`CDAR`の静的完成。
+- Reset Handlerによる完成済み`.SRAM2`イメージのロード。
+
+### 通常の実行時経路から削除したもの
+
+- 実行時キュー構築。
+- 実行時ノード接続。
+- 実行時`connectSelectorAddresses()`。
+- 暫定的な`constructor(101)`によるSRAM2コピー。
+
 ## 設計目標
 
-このライブラリが最終的に目指す設計方針は以下です。
+v2では次を目標とします。
 
-- 構造に対する徹底した型安全性
-- GPDMAノードグラフの徹底した静的初期化
-- 実行時のキュー構築を行わない
-- 実行時のノード接続を行わない
-- 実行時処理を開始ノードのロードとDMA有効化だけにする
+- 構造に対する厳密な型安全性
+- GPDMAノードグラフの静的構築
+- 物理チェーン番号に依存しない名前付きProgram/List/Node位置
+- 実行時キュー構築なし
+- 実行時ノード接続なし
+- 実行時処理をチャネル準備、開始位置ロード、DMA有効化に限定
 
-alpha.1では、selectorの`CSAR`と`CDAR`に対する2回の代入が起動時に残っています。
-以降のv2開発では、これらもリンカリロケーションにより解決し、実行時パッチを
-廃止する予定です。
+完成済み`.SRAM2`ロードイメージをFlashからSRAM2実行アドレスへコピーする処理は、
+グラフの実行時構築ではなく、完成済みイメージのロードとして扱います。
 
-Flash上の完成済み`.SRAM2`ロードイメージをSRAM2の実行アドレスへコピーする
-処理は、ノードグラフの実行時構築ではなく、完成済みイメージのロードとして
-扱います。
+## 名前付きProgram/List/Node
 
-## プロトタイプの構造
+Program名とList名には、実行時データを持たない型タグを使用します。型タグは
+ROOTイメージへフィールドを追加しません。
+
+```cpp
+namespace SpiGpioProgram
+{
+    struct Program;
+    struct InitialDataLength;
+    struct Dispatch;
+
+    using Entry = list_entry<Program, InitialDataLength>;
+    using DispatchSelector = list_entry<Program, Dispatch>;
+    using DispatchExecutor = list_tail<Program, Dispatch>;
+}
+```
+
+各論理位置から、ライブラリが次を解決します。
+
+- 物理List番号
+- List内Node番号
+- ROOT先頭からのバイトオフセット
+- 対象LLI型
+- 必要なCLLR更新フラグ
+
+Listの追加または並べ替えによって、公開側のジャンプ先番号を数え直す必要が
+なくなります。
+
+## Listの自動接続
+
+各List内のNodeは、`make_lli()`により宣言順に接続されます。
+
+隣接Listは、同じProgramタグを持つ場合に限って自動接続されます。
+
+```text
+Program A / List 0末尾 -> Program A / List 1先頭
+Program A / List 1末尾 -> Program A / List 2先頭
+Program A / 最終List末尾 -> 0
+
+Program A / 最終List末尾 -X-> Program B / 最初のList先頭
+```
+
+Program境界は既定で終端です。Program間遷移は明示的に指定します。
+
+```cpp
+patch_jump<ProgramA::Exit, ProgramB::Entry>(root);
+```
+
+現在のSPI/GPIOグラフで必要な明示的上書きは2本だけです。
+
+1. 初回SPI開始Listからdispatcherへ直接移動する。
+2. 最後のGPIO Low Listから通常ループの開始位置へ戻る。
+
+その他の同一Program内List遷移は自動生成されます。
+
+## descriptor構造
 
 selectorは、現在のdescriptorからSRAM2上のROOTイメージへ正確に32バイトを
 転送します。
 
 | Descriptor側 | 書き込み先 |
 |---|---|
-| `nextSelectorSource` | `selector.CSAR` |
-| `nextSelectorDestination` | `selector.CDAR` |
-| `nextSelectorLink` | `selector.CLLR` |
+| 次selector送信元 | `selector.CSAR` |
+| 次selector書き込み先 | `selector.CDAR` |
+| 次selectorリンク | `selector.CLLR` |
 | `executor.CTR1` | `executor.CTR1` |
 | `executor.CTR2` | `executor.CTR2` |
 | `executor.CBR1` | `executor.CBR1` |
 | `executor.CSAR` | `executor.CSAR` |
 | `executor.CDAR` | `executor.CDAR` |
 
-`executor.CLLR`は意図的に書き換え範囲の外にあります。このためexecutorは、
-静的に生成された後続ノードへのリンクを保持します。
+`executor.CLLR`は書き換え範囲外です。このためexecutorは、静的に生成された
+後続Listへのリンクを保持します。
 
-関連するオブジェクトサイズ、オフセット、アラインメント、書き換え範囲は
-`static_assert`で検証しています。
+v2.0.0-beta.1で検証対象とするdescriptor executor image型は次に限定します。
+
+```cpp
+DESC_12BSD_t
+```
+
+内部のdescriptor実装はexecutor image型でテンプレート化していますが、部分更新型や
+2D型はv2.0.0の対象外です。
+
+## dispatcherレイアウトの自動導出
+
+`descriptor_dispatch_layout`は、ROOT型と名前付きselector/executor位置から次を
+自動導出します。
+
+- selectorのROOT内オフセット
+- executorのROOT内オフセット
+- 書き換え範囲の開始位置
+- 書き換え範囲の終了位置とサイズ
+- selectorからexecutorへのCLLR
+- descriptor step型
+
+利用側では、次の物理定数を定義する必要がありません。
+
+```text
+DESCRIPTOR_CHAIN_OFFSET
+SELECTOR_OFFSET
+EXECUTOR_OFFSET
+DESCRIPTOR_PATCH_BEGIN
+DESCRIPTOR_PATCH_END
+SELECTOR_TO_EXECUTOR_CLLR
+```
+
+導出された書き換え範囲と`sizeof(descriptor_step<DESC_12BSD_t>)`の一致は、
+`static_assert`で検証します。
+
+## descriptor ringの静的構築
+
+descriptor ringは、descriptor間参照とSRAM実行ROOTへの参照を含む`constinit`
+オブジェクトとして構築します。
+
+```cpp
+constinit descriptor_step_t descList[4] = {
+    descriptor_dispatch_t::make_step(
+        &descList[1], SPI_GPIO_ROOT, test_spi_dat1),
+    descriptor_dispatch_t::make_step(
+        &descList[2], SPI_GPIO_ROOT, test_spi_dat2),
+    descriptor_dispatch_t::make_step(
+        &descList[3], SPI_GPIO_ROOT, test_spi_dat3),
+    descriptor_dispatch_t::make_step(
+        &descList[0], SPI_GPIO_ROOT, test_spi_dat4)
+};
+```
+
+初期descriptorは`start_at<N>`で指定します。
+
+```cpp
+start_at<0>{}
+```
+
+`N`を変更することで、実行時パッチなしにring内の別descriptorを開始位置に
+指定できます。
+
+## selectorの静的接続
+
+alpha.1では、selectorの`CSAR`と`CDAR`を起動時の2代入で接続していました。
+beta.1ではROOTの静的初期化式に含めます。
+
+```cpp
+[[gnu::used]]
+[[gnu::section(".SRAM2")]]
+constinit root_t SPI_GPIO_ROOT = [] {
+    auto root = SPI_GPIO_ROOT_TEMPLATE;
+
+    descriptor_dispatch_t::initialize_selector(
+        root,
+        SPI_GPIO_ROOT,
+        descList,
+        start_at<0>{}
+    );
+
+    return root;
+}();
+```
+
+コンパイラは静的初期値とリロケーション情報を生成し、リンカがdescriptor ringと
+SRAM2実行ROOTの配置後に最終アドレスを解決します。
+
+`userMain()`からselector接続関数を呼び出す必要はありません。
+
+## SRAM2実行イメージ
+
+beta.1の実機試験アプリケーションでは、書き換え可能ROOTを初期値付きの`.SRAM2`
+出力セクションへ配置します。
+
+```ld
+.SRAM2 :
+{
+    . = ALIGN(8);
+    __sram2_start__ = .;
+
+    KEEP(*(.SRAM2))
+    KEEP(*(.SRAM2.*))
+
+    . = ALIGN(8);
+    __sram2_end__ = .;
+} > SRAM2 AT > ROM
+
+__sram2_load__ = LOADADDR(.SRAM2);
+```
+
+`AT > ROM`により、SRAM2実行イメージにFlash上のロードイメージを持たせます。
+アプリケーションのReset Handlerは、`SystemInit()`の直後、通常のC/C++ランタイム
+初期化より前に、`__sram2_load__`から`__sram2_start__ .. __sram2_end__`へコピー
+します。
+
+```text
+SystemInit()
+    -> FlashからSRAM2へ完成済み.SRAM2イメージをコピー
+    -> .data/.tdataを初期化
+    -> .bss/.tbssをゼロクリア
+    -> __libc_init_array()
+    -> main()
+```
+
+このリンカ設定とstartup処理は、beta.1の実機試験で使用したアプリケーション側の
+統合条件です。試験アプリケーションのリンカスクリプト全体を採用する必要は
+ありません。対象アプリケーションの既存メモリ配置へ、初期値付きSRAM2セクションと
+起動時コピーを統合してください。
+
+## 実行時の責務
+
+`load_lli()`は開始リンクだけを設定します。
+
+- `CLBAR`
+- `CLLR`
+
+呼び出し側は次を担当します。
+
+- チャネル停止またはRESET
+- 内部レジスタファイルLLI0の準備
+- null LLI0が必要な場合の`CBR1.BNDT = 0`
+- `CCR`設定
+- チャネル有効化
+
+現在のサンプルでは次のように開始します。
+
+```cpp
+GPDMA1_Channel0->CCR |= 0x0000'0002u; // RESET
+GPDMA1_Channel0->CBR1 = 0;             // BNDT = 0, null LLI0
+
+load_lli<SpiGpioProgram::Entry>(
+    *GPDMA1_Channel0,
+    SPI_GPIO_ROOT
+);
+
+GPDMA1_Channel0->CCR |= 0x0000'0001u; // EN
+```
+
+`CCR.RESET`はFIFO、内部状態、`EN`、`SUSP`をリセットしますが、`CBR1`、`CSAR`、
+`CDAR`をゼロには戻しません。
+
+## alpha.1と同一の観測動作
+
+beta.1をSTM32U575実機で動作確認し、alpha.1と同じdescriptor順序、MOSIデータ、
+GPIO動作を再現することを確認しました。
+
+変更していない項目：
+
+- GPDMA1 Channel 0
+- SPI1単方向送信モード
+- 4要素descriptor ringの順序
+- 各descriptorの10バイト転送
+- 送信元オフセット`10`、`0`、`40`、`12`
+- GPIO制御波形
+- executor書き換え動作
+- descriptor 3からdescriptor 0への循環
+- DMA開始後のCPU非介在descriptor選択
+
+ここに保存するcaptureファイルはalpha.1で取得したものです。これらはbeta.1でも
+再現を確認した外部観測シーケンスの参照記録ですが、beta.1で新たに取得した
+測定ファイルではありません。
 
 ## 実機確認時の構成
 
-波形を取得した際の構成は以下です。
+参照capture取得時の構成：
 
 - MCU: STM32U575
 - GPDMA: GPDMA1 Channel 0
@@ -307,63 +881,63 @@ selectorは、現在のdescriptorからSRAM2上のROOTイメージへ正確に32
 - システムクロック: 80 MHz
 - SPI1 SCK: PA5
 - SPI1 MOSI: PA7
-- 波形に表示したシーケンス制御出力: PC6
+- シーケンス制御出力: PC6
 - ROOT実行領域: SRAM2
-- ROOT初期イメージ: 起動時にFlashからロード
+- ROOT初期イメージ: Reset HandlerでFlashからロード
 
-`original_init.hpp`には、実機確認に使用した元プロジェクトの初期化コードを
-保存しています。GPDMA実験に関係しない初期化も含まれますが、実際の検証環境を
-記録する目的で収録しています。最小初期化例や再利用可能なplatform layerでは
-ありません。
+`original_init.hpp`には、実機確認に使用した元プロジェクトの初期化コードを保存して
+います。GPDMA実験に関係しない初期化も含まれ、最小構成または再利用可能なplatform
+layerではありません。
 
-## ヘッダースナップショット
+## ソーススナップショット
 
-`include/`以下には、v2.0.0-alpha.1の実機検証で使用したヘッダーを保存しています。
+開発記録スナップショットには次を含めます。
 
-- `gpdma_lli.hpp`
-- `gpdma_lli_t.hpp`
-- `stm32u575_spi_t.hpp`
+- `include/gpdma_lli.hpp`
+- `include/gpdma_lli_t.hpp`
+- `include/stm32u575_spi_t.hpp`
+- `v2_0_0_alpha_1_user_main.cpp`
+- `v2_0_0_beta_1_user_main.cpp`
+- `original_init.hpp`
+- `example/startup_stm32u575xx.s`
+- `example/STM32U575xx_FLASH.ld`
 
-これらはv1.1.0を基礎として、`DESC_12BSD_t`やSTM32U575 SPI用の型など、
-本プロトタイプに必要な実験的追加を含んでいます。
+バージョン名を付けた`user_main`ファイルには、各開発段階で使用した
+アプリケーションコードを保存しています。beta.1の実機確認には
+`v2_0_0_beta_1_user_main.cpp`を使用しています。
 
-このヘッダー群は開発記録用の依存ファイルです。リポジトリ直下の安定版ヘッダーを
-置き換えるものではなく、安定版ヘッダーと同時にインストールすることも意図して
-いません。
+`example/`のファイルは、初期化済み`.SRAM2`実行イメージをFlashからロードする
+ために必要なstartupおよびlinker統合例です。完全な単独実行サンプルではなく、
+対象アプリケーションへ統合する際の参照コードです。
+
+SPI固有コードは実験用アプリケーションであり、汎用GPDMA LLIライブラリAPIには
+含みません。
 
 ## Logic capture
 
-`capture/`ディレクトリには、このプロトタイプの確認に使用した測定データを
-保存しています。
+`capture/`には、前節で説明したalpha.1の測定ファイルを保存しています。
+beta.1で再現確認したシーケンスの参照記録として維持します。
 
 ### ファイル
 
 - `capture/v2_0_0_alpha_capture.sal`  
-  Saleae Logic 2の元captureです。Logic 2で開くと、個々の転送の拡大、タイミング
-  確認、Analyzer表示の変更ができます。
+  Saleae Logic 2の元capture。
 
 - `capture/v2_0_0_alpha_capture.csv`  
-  SPI Analyzerのエクスポート結果です。デコードされた転送データを記録しており、
-  テキスト確認、スクリプト処理、descriptor循環順序の確認に使用できます。
+  SPI Analyzerのエクスポート結果。
 
 - `capture/v2_0_0_alpha_capture.png`  
-  Logic 2の代表スクリーンショットです。左側の波形にはPC6がLowの期間に行われる
-  10バイトのSPI転送を1件表示しています。右側のDataテーブルには、より広い範囲の
-  descriptor循環が表示されています。
+  Logic 2の代表スクリーンショット。
 
-### スクリーンショットに表示されている信号
+### 信号
 
 | Logic 2上の行 | 信号 | 用途 |
 |---|---|---|
 | D1 / RB2 | SPI clock | SPI1 SCK |
 | D0 / RB3 | SPI MOSI | SPI1送信データ |
-| D3 / PC6 | 制御出力 | capture上で確認するActive-Lowの転送期間 |
+| D3 / PC6 | 制御出力 | Active-Lowの転送期間 |
 
-表示されているその他のチャンネルは、この実験の確認には使用していません。
-
-### Captureから確認できること
-
-右側のAnalyzerテーブルには、以下のMOSIデータが順番に表示されています。
+### 実機で再現確認したMOSIシーケンス
 
 ```text
 10 11 12 13 14 15 16 17 18 19
@@ -373,62 +947,76 @@ selectorは、現在のdescriptorからSRAM2上のROOTイメージへ正確に32
 10 11 12 ...
 ```
 
-この結果から、以下を確認できます。
+alpha.1のcaptureから次を確認できます。
 
-- 各executor転送が10バイトである
-- descriptorの順序が維持されている
-- descriptor 3からdescriptor 0へ戻っている
-- selectorがdescriptor ringを前進させている
-- executorノードの自己書き換えが成立している
-- GPDMA開始後、CPUによるdescriptor選択なしで処理が継続している
-
-スクリーンショット左側の波形表示は1回分の転送を拡大して表示しています。
-1周期全体は右側のLogic 2 DataテーブルとCSVで確認できます。
+- 各executor転送が10バイト
+- descriptor順序が維持される
+- descriptor 3からdescriptor 0へ戻る
+- selectorがdescriptor ringを前進させる
+- executor像の書き換えが成立する
+- CPU介入なしでdescriptor選択が継続する
 
 ## ハードウェア固有の重要な制限
 
-このプロトタイプでは、SPI送信完了後にSPIを無効化する要求として、TXC付近で
-観測されたSPI RX DMA要求を利用しています。
+この実験では、SPI送信完了後にSPIを無効化する要求として、TXC付近で観測された
+SPI RX DMA要求を使用しています。
 
-検証したSTM32U575の設定では、SPIを有効化した直後の最初の単方向送信完了時に、
-SPI RX DMA要求が1回発生することを実機で確認しました。この挙動はRMまたは
-データシートに記載された保証動作ではありません。
+検証したSTM32U575構成では、SPIを有効化した直後の最初の単方向送信完了時に、
+SPI RX DMA要求が1回発生しました。この挙動はRMまたはデータシートに記載された
+保証動作ではありません。
 
-以下を変更した場合は再検証が必要です。
+次を変更した場合は再検証が必要です。
 
 - MCUまたはシリコンリビジョン
-- SPIの方向またはFIFO設定
-- SPIの初期化順序
+- SPI方向またはFIFO設定
+- SPI初期化順序
 - DMA request設定
 - クロック設定
 
-## alpha.1の既知の制限
+## beta.1の既知の制限
 
-- v1.1.0のnode/group基盤上に増築した実装です。
-- descriptor dispatchの公開APIは未確定です。
-- `DESC_12BSD_t`は本プロトタイプで使用する実験的descriptor型です。
-- selectorの`CSAR`と`CDAR`を起動時の2代入で接続します。
-- `.SRAM2`のロードには暫定的に`constructor(101)`を使用します。
-- platform初期化は元のアプリケーションから保存したもので、最小構成ではありません。
-- SPI完了処理は、仕様書に記載のない実測挙動に依存します。
+- Program/List/Node公開APIは開発中です。
+- v2.0.0-beta.1で検証対象とするdescriptor executor image型は
+  `DESC_12BSD_t`のみです。
+- `executor.CLLR`はdescriptor書き換え範囲に含みません。
+- Program/Listタグ重複検査は未完成です。
+- 不正な`list_tail`指定では、深いテンプレートエラーになる場合があります。
+- 最適化およびLTO回帰試験は未完了です。
+- platform初期化は元アプリケーション由来で、最小構成ではありません。
+- SPI完了処理は仕様書に記載のない実測挙動に依存します。
+
+## RCまでの残作業
+
+- Program/Listタグ重複検査を完成する。
+- 不正な`list_tail`指定の診断を改善する。
+- Program/List公開APIを確定する。
+- 名前付き位置とdispatcherレイアウトの負のコンパイル試験を追加する。
+- `-O0`、`-Og`、`-O2`、`-O3`、`-Os`、`-O3 -flto`、`-Os -flto`を確認する。
+- 代表ビルドの`.SRAM2` VMA/LMAとリロケーションを検査する。
+- ROOT用の動的初期化関数が生成されないことを確認する。
+- API凍結後に代表的な実機試験を再実行する。
 
 ## ディレクトリ構成
 
 ```text
 stm32u575_spi_descriptor_dispatch/
-├── README.md
-├── v2_0_0_alpha1_user_main.cpp
-├── original_init.hpp
+├── capture/
+│   ├── v2_0_0_alpha_capture.csv
+│   ├── v2_0_0_alpha_capture.png
+│   └── v2_0_0_alpha_capture.sal
+├── example/
+│   ├── startup_stm32u575xx.s
+│   └── STM32U575xx_FLASH.ld
 ├── include/
-│   ├── gpdma_lli.hpp
 │   ├── gpdma_lli_t.hpp
+│   ├── gpdma_lli.hpp
 │   └── stm32u575_spi_t.hpp
-└── capture/
-    ├── v2_0_0_alpha_capture.sal
-    ├── v2_0_0_alpha_capture.csv
-    └── v2_0_0_alpha_capture.png
+├── original_init.hpp
+├── README.md
+├── v2_0_0_alpha_1_user_main.cpp
+└── v2_0_0_beta_1_user_main.cpp
 ```
 
-このディレクトリは開発記録です。最終的なv2 APIへ機能を統合した後、実験コードや
-重複したヘッダースナップショットを最新ブランチから削除する場合があります。
-削除後も、`v2.0.0-alpha.1`タグおよびGit履歴から、この時点のファイルを参照できます。
+このディレクトリは開発記録です。最終v2公開APIへ機能を統合した後、実装スナップ
+ショットを最新ブランチから削除する場合があります。beta.1タグとGit履歴から、この
+時点の実装を参照できます。

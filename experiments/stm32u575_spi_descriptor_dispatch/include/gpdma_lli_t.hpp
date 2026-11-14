@@ -42,7 +42,13 @@ struct LLI_12SD_t           { uint32_t CTR1, CTR2, CSAR, CDAR, CLLR; };
 struct LLI_12B_t            { uint32_t CTR1, CTR2, CBR1, CLLR; };
 struct LLI_12BD_t           { uint32_t CTR1, CTR2, CBR1, CDAR, CLLR; };
 struct LLI_12BS_t           { uint32_t CTR1, CTR2, CBR1, CSAR, CLLR; };
-struct LLI_12BSD_t          { uint32_t CTR1, CTR2, CBR1, CSAR, CDAR, CLLR; };
+struct LLI_12BSD_t
+{
+    uint32_t CTR1, CTR2, CBR1;
+    union { uint32_t CSAR; const void* CSAR_pointer; };
+    union { uint32_t CDAR; void* CDAR_pointer; };
+    uint32_t CLLR;
+};
 
 // --- グループ1: CBR2 のみ追加 (_B2) (32パターン) ---
 struct LLI__B2_t            { uint32_t CBR2, CLLR; };

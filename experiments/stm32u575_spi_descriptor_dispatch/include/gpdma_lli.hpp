@@ -240,8 +240,74 @@ constexpr uint32_t start_cllr(
         (offset & 0xFFFCU);
 }
 
-// 複数チェーンをhead/tailの入れ子で保持する
-template<typename... CHAINS>
+template<typename ExecutorImage>
+inline constexpr bool supported_descriptor_executor_image_v = false;
+
+template<>
+inline constexpr bool supported_descriptor_executor_image_v<DESC_12BSD_t> = true;
+
+// selectorのCSAR/CDAR/CLLRとexecutor更新像を連続配置する。
+// v2.0.0では完全な1D executor像であるDESC_12BSD_tだけを受け付ける。
+template<typename ExecutorImage>
+    requires supported_descriptor_executor_image_v<ExecutorImage>
+struct descriptor_step
+{
+    union
+    {
+        uint32_t next_selector_csar;
+        const descriptor_step* next_selector_csar_pointer;
+    };
+    union
+    {
+        uint32_t next_selector_cdar;
+        uint32_t* next_selector_cdar_pointer;
+    };
+    uint32_t next_selector_cllr;
+    ExecutorImage executor;
+};
+
+static_assert(std::is_standard_layout_v<descriptor_step<DESC_12BSD_t>>);
+static_assert(sizeof(descriptor_step<DESC_12BSD_t>) == 32);
+static_assert(offsetof(descriptor_step<DESC_12BSD_t>, executor) == 12);
+
+// descriptor dispatcherの初期descriptor番号を型で指定する。
+template<std::size_t Index>
+struct start_at
+{
+    static constexpr std::size_t index = Index;
+};
+
+// Program/Listタグと物理チェーンを結び付ける。
+// タグは型情報だけに使い、ROOTにはチェーンのレジスタ像だけを保持する。
+template<typename ProgramTag, typename ListTag, typename Chain>
+struct lli_list
+{
+    using program_tag = ProgramTag;
+    using list_tag = ListTag;
+    using chain_type = Chain;
+
+    Chain chain;
+};
+
+template<typename ProgramTag, typename ListTag, typename Chain>
+constexpr auto make_list(Chain chain)
+{
+    return lli_list<ProgramTag, ListTag, Chain>{chain};
+}
+
+template<typename T>
+struct list_traits;
+
+template<typename ProgramTag, typename ListTag, typename Chain>
+struct list_traits<lli_list<ProgramTag, ListTag, Chain>>
+{
+    using program_tag = ProgramTag;
+    using list_tag = ListTag;
+    using chain_type = Chain;
+};
+
+// 複数の名前付きListをhead/tailの入れ子で保持する。
+template<typename... LISTS>
 struct lli_group;
 
 template<>
@@ -325,30 +391,85 @@ struct group_traits<lli_group<HEAD, TAIL...>>
     using tail_type = lli_group<TAIL...>;
 };
 
-// ROOT内の位置を、0始まりのチェーン番号とチェーン内LLI番号で表す。
-// ROOT全体を通した絶対ノード番号ではない。
-// node_at<AbsoluteIndex>形式のフラットアドレッシングは提供しない。
-template<std::size_t ChainIndex, std::size_t NodeIndex>
+// ROOT内の位置をProgram/ListタグとList内ノード番号で表す。
+template<typename ProgramTag, typename ListTag, std::size_t NodeIndex>
 struct node_at
 {
-    static constexpr std::size_t chain_index = ChainIndex;
+    using program_tag = ProgramTag;
+    using list_tag = ListTag;
+
     static constexpr std::size_t node_index = NodeIndex;
 };
 
-template<typename POSITION>
+// Listの先頭または末尾を、Node番号に依存せずに表す。
+template<typename ProgramTag, typename ListTag>
+struct list_entry
+{
+    using program_tag = ProgramTag;
+    using list_tag = ListTag;
+};
+
+template<typename ProgramTag, typename ListTag>
+struct list_tail
+{
+    using program_tag = ProgramTag;
+    using list_tag = ListTag;
+};
+
+template<typename ProgramTag, typename ListTag, typename GROUP>
+struct group_list_index;
+
+template<typename ProgramTag, typename ListTag, typename HEAD, typename... TAIL>
+struct group_list_index<
+    ProgramTag,
+    ListTag,
+    lli_group<HEAD, TAIL...>
+>
+{
+private:
+    static constexpr bool matches =
+        std::is_same_v<ProgramTag, typename list_traits<HEAD>::program_tag> &&
+        std::is_same_v<ListTag, typename list_traits<HEAD>::list_tag>;
+
+public:
+    static constexpr std::size_t value = [] {
+        if constexpr (matches)
+        {
+            return std::size_t{0};
+        }
+        else
+        {
+            return std::size_t{1} +
+                group_list_index<
+                    ProgramTag,
+                    ListTag,
+                    lli_group<TAIL...>
+                >::value;
+        }
+    }();
+};
+
+template<typename ProgramTag, typename ListTag>
+struct group_list_index<ProgramTag, ListTag, lli_group<>>
+{
+    static constexpr std::size_t value = 0;
+};
+
+template<typename ProgramTag, typename ListTag, typename GROUP>
+inline constexpr bool group_has_list_v =
+    group_list_index<
+        ProgramTag,
+        ListTag,
+        std::remove_cvref_t<GROUP>
+    >::value <
+    group_traits<std::remove_cvref_t<GROUP>>::chain_count;
+
+template<typename POSITION, typename GROUP>
 struct node_position_traits
 {
     static constexpr bool valid = false;
     static constexpr std::size_t chain_index = 0;
     static constexpr std::size_t node_index = 0;
-};
-
-template<std::size_t ChainIndex, std::size_t NodeIndex>
-struct node_position_traits<node_at<ChainIndex, NodeIndex>>
-{
-    static constexpr bool valid = true;
-    static constexpr std::size_t chain_index = ChainIndex;
-    static constexpr std::size_t node_index = NodeIndex;
 };
 
 // 指定したチェーン番号に対応するチェーン型を取得する。
@@ -358,7 +479,7 @@ struct group_chain_type;
 template<typename HEAD, typename... TAIL>
 struct group_chain_type<0, lli_group<HEAD, TAIL...>>
 {
-    using type = HEAD;
+    using type = typename list_traits<HEAD>::chain_type;
 };
 
 template<std::size_t Index, typename HEAD, typename... TAIL>
@@ -366,6 +487,68 @@ template<std::size_t Index, typename HEAD, typename... TAIL>
 struct group_chain_type<Index, lli_group<HEAD, TAIL...>>
     : group_chain_type<Index - 1, lli_group<TAIL...>>
 {
+};
+
+template<
+    typename ProgramTag,
+    typename ListTag,
+    std::size_t NodeIndex,
+    typename GROUP
+>
+struct node_position_traits<
+    node_at<ProgramTag, ListTag, NodeIndex>,
+    GROUP
+>
+{
+    static constexpr bool valid =
+        group_has_list_v<ProgramTag, ListTag, GROUP>;
+    static constexpr std::size_t chain_index =
+        group_list_index<
+            ProgramTag,
+            ListTag,
+            std::remove_cvref_t<GROUP>
+        >::value;
+    static constexpr std::size_t node_index = NodeIndex;
+};
+
+template<typename ProgramTag, typename ListTag, typename GROUP>
+struct node_position_traits<
+    list_entry<ProgramTag, ListTag>,
+    GROUP
+>
+{
+    static constexpr bool valid =
+        group_has_list_v<ProgramTag, ListTag, GROUP>;
+    static constexpr std::size_t chain_index =
+        group_list_index<
+            ProgramTag,
+            ListTag,
+            std::remove_cvref_t<GROUP>
+        >::value;
+    static constexpr std::size_t node_index = 0;
+};
+
+template<typename ProgramTag, typename ListTag, typename GROUP>
+struct node_position_traits<
+    list_tail<ProgramTag, ListTag>,
+    GROUP
+>
+{
+    static constexpr bool valid =
+        group_has_list_v<ProgramTag, ListTag, GROUP>;
+    static constexpr std::size_t chain_index =
+        group_list_index<
+            ProgramTag,
+            ListTag,
+            std::remove_cvref_t<GROUP>
+        >::value;
+    static constexpr std::size_t node_index =
+        node_traits<
+            typename group_chain_type<
+                chain_index,
+                std::remove_cvref_t<GROUP>
+            >::type
+        >::size - 1;
 };
 
 template<std::size_t ChainIndex, std::size_t NodeIndex, typename GROUP>
@@ -390,10 +573,10 @@ concept ValidGroupNode =
 
 template<typename POSITION, typename GROUP>
 concept ValidNodePosition =
-    node_position_traits<POSITION>::valid &&
+    node_position_traits<POSITION, GROUP>::valid &&
     ValidGroupNode<
-        node_position_traits<POSITION>::chain_index,
-        node_position_traits<POSITION>::node_index,
+        node_position_traits<POSITION, GROUP>::chain_index,
+        node_position_traits<POSITION, GROUP>::node_index,
         GROUP
     >;
 
@@ -405,7 +588,7 @@ constexpr decltype(auto) group_chain_at(
 {
     if constexpr (Index == 0)
     {
-        return (group.head);
+        return (group.head.chain);
     }
     else
     {
@@ -420,7 +603,7 @@ constexpr decltype(auto) group_chain_at(
 {
     if constexpr (Index == 0)
     {
-        return (group.head);
+        return (group.head.chain);
     }
     else
     {
@@ -467,7 +650,12 @@ constexpr std::size_t group_chain_offset()
 
     if constexpr (Index == 0)
     {
-        return offsetof(group_t, head);
+        using list_t =
+            std::remove_cvref_t<decltype(group_t::head)>;
+
+        return
+            offsetof(group_t, head) +
+            offsetof(list_t, chain);
     }
     else
     {
@@ -557,7 +745,7 @@ constexpr uint32_t start_cllr(
 )
 {
     using root_t = lli_group<CHAINS...>;
-    using position_t = node_position_traits<POSITION>;
+    using position_t = node_position_traits<POSITION, root_t>;
     using chain_t =
         typename group_chain_type<position_t::chain_index, root_t>::type;
     using node_t =
@@ -579,6 +767,149 @@ constexpr uint32_t start_cllr(
 
     return start_cllr<lli_t>(static_cast<uint32_t>(offset));
 }
+
+// descriptor dispatcherの物理配置とpatch範囲をROOT型から導出する。
+// 呼び出し側にはselector/executorのオフセット計算を公開しない。
+template<
+    typename SelectorPosition,
+    typename ExecutorPosition,
+    typename ExecutorImage,
+    typename ROOT
+>
+    requires (
+        supported_descriptor_executor_image_v<ExecutorImage> &&
+        ValidNodePosition<SelectorPosition, std::remove_cvref_t<ROOT>> &&
+        ValidNodePosition<ExecutorPosition, std::remove_cvref_t<ROOT>>
+    )
+struct descriptor_dispatch_layout
+{
+    using root_type = std::remove_cvref_t<ROOT>;
+    using step_type = descriptor_step<ExecutorImage>;
+
+private:
+    using selector_position =
+        node_position_traits<SelectorPosition, root_type>;
+    using executor_position =
+        node_position_traits<ExecutorPosition, root_type>;
+    using selector_chain =
+        typename group_chain_type<
+            selector_position::chain_index,
+            root_type
+        >::type;
+    using executor_chain =
+        typename group_chain_type<
+            executor_position::chain_index,
+            root_type
+        >::type;
+    using selector_node =
+        typename chain_node_type<
+            selector_position::node_index,
+            selector_chain
+        >::type;
+    using executor_node =
+        typename chain_node_type<
+            executor_position::node_index,
+            executor_chain
+        >::type;
+
+    using selector_image =
+        typename node_traits<selector_node>::current_type;
+    using executor_lli =
+        typename node_traits<executor_node>::current_type;
+
+    static constexpr std::size_t selector_offset =
+        group_chain_offset<
+            selector_position::chain_index,
+            root_type
+        >() +
+        chain_node_offset<
+            selector_position::node_index,
+            selector_chain
+        >();
+
+    static constexpr std::size_t executor_offset =
+        group_chain_offset<
+            executor_position::chain_index,
+            root_type
+        >() +
+        chain_node_offset<
+            executor_position::node_index,
+            executor_chain
+        >();
+
+    static constexpr std::size_t patch_begin =
+        selector_offset + offsetof(selector_image, CSAR);
+
+    static constexpr std::size_t patch_end =
+        executor_offset + offsetof(executor_lli, CLLR);
+
+    static_assert(
+        patch_end - patch_begin == sizeof(step_type),
+        "descriptor patch range must match descriptor_step"
+    );
+
+public:
+    static constexpr uint32_t selector_to_executor_cllr =
+        start_cllr<ExecutorPosition>(root_type{});
+
+    template<std::size_t StepCount, std::size_t StartIndex = 0>
+        requires (StartIndex < StepCount)
+    static constexpr void initialize_selector(
+        root_type& image,
+        root_type& execution_root,
+        const step_type (&steps)[StepCount],
+        start_at<StartIndex> = {}
+    )
+    {
+        auto& selector = chain_node_at<selector_position::node_index>(
+            group_chain_at<selector_position::chain_index>(image)
+        ).current;
+
+        auto& execution_selector =
+            chain_node_at<selector_position::node_index>(
+                group_chain_at<selector_position::chain_index>(execution_root)
+            ).current;
+
+        selector.CSAR_pointer = &steps[StartIndex];
+        selector.CDAR_pointer = &execution_selector.CSAR;
+    }
+
+    static constexpr step_type make_step(
+        const step_type* next,
+        root_type& root,
+        ExecutorImage executor
+    )
+    {
+        auto& selector = chain_node_at<selector_position::node_index>(
+            group_chain_at<selector_position::chain_index>(root)
+        ).current;
+
+        return {
+            .next_selector_csar_pointer = next,
+            .next_selector_cdar_pointer = &selector.CSAR,
+            .next_selector_cllr = selector_to_executor_cllr,
+            .executor = executor
+        };
+    }
+
+    template<std::size_t StepCount, std::size_t StartIndex = 0>
+        requires (StartIndex < StepCount)
+    static void connect_selector(
+        root_type& root,
+        const step_type (&steps)[StepCount],
+        start_at<StartIndex> = {}
+    )
+    {
+        auto& selector = chain_node_at<selector_position::node_index>(
+            group_chain_at<selector_position::chain_index>(root)
+        ).current;
+
+        selector.CBR1 = sizeof(step_type);
+        selector.CSAR_pointer = &steps[StartIndex];
+        selector.CDAR_pointer = &selector.CSAR;
+        selector.CLLR = selector_to_executor_cllr;
+    }
+};
 
 template<
     std::size_t ChainIndex,
@@ -693,13 +1024,16 @@ constexpr bool chain_targets_valid(
 }
 
 // ROOT内の全LLIのCLLRが終端か、有効なROOT内ノードを指すことを検証する。
-template<LLIChainType... CHAINS>
-    requires (sizeof...(CHAINS) > 0)
+template<typename... LISTS>
+    requires (
+        sizeof...(LISTS) > 0 &&
+        (requires { typename list_traits<LISTS>::chain_type; } && ...)
+    )
 constexpr bool validate_root(
-    const lli_group<CHAINS...>& root
+    const lli_group<LISTS...>& root
 )
 {
-    using root_t = lli_group<CHAINS...>;
+    using root_t = lli_group<LISTS...>;
 
     if constexpr (
         !std::is_standard_layout_v<root_t> ||
@@ -823,8 +1157,8 @@ constexpr void patch_jump(
 )
 {
     using root_t = lli_group<CHAINS...>;
-    using from_t = node_position_traits<FROM>;
-    using to_t = node_position_traits<TO>;
+    using from_t = node_position_traits<FROM, root_t>;
+    using to_t = node_position_traits<TO, root_t>;
 
     using target_chain_t =
         typename group_chain_type<
@@ -866,6 +1200,22 @@ constexpr void patch_jump(
     from_node.current.CLLR = target_cllr;
 }
 
+// 指定したLLIをリンク終端へ変更する。
+template<typename POSITION, typename... CHAINS>
+    requires ValidNodePosition<POSITION, lli_group<CHAINS...>>
+constexpr void patch_end(
+    lli_group<CHAINS...>& root
+)
+{
+    using root_t = lli_group<CHAINS...>;
+    using position_t = node_position_traits<POSITION, root_t>;
+
+    auto& node = chain_node_at<position_t::node_index>(
+        group_chain_at<position_t::chain_index>(root)
+    );
+    node.current.CLLR = 0;
+}
+
 // チェーンがなくなったら再帰を終了する
 constexpr void fixup_group(
     lli_group<>&,
@@ -874,13 +1224,49 @@ constexpr void fixup_group(
 {
 }
 
-// グループ内の各チェーンを検証する。base_offsetはROOT先頭からの位置。
-constexpr bool group_links_valid(
-    const lli_group<>&,
+template<typename HEAD>
+constexpr void connect_program_lists(
+    lli_group<HEAD>&,
     uint32_t
 )
 {
-    return true;
+}
+
+template<typename HEAD, typename NEXT, typename... TAIL>
+constexpr void connect_program_lists(
+    lli_group<HEAD, NEXT, TAIL...>& group,
+    uint32_t base_offset
+)
+{
+    using group_t = lli_group<HEAD, NEXT, TAIL...>;
+    using tail_group_t = lli_group<NEXT, TAIL...>;
+
+    if constexpr (
+        std::is_same_v<
+            typename list_traits<HEAD>::program_tag,
+            typename list_traits<NEXT>::program_tag
+        >
+    )
+    {
+        using next_chain_t = typename list_traits<NEXT>::chain_type;
+        using next_lli_t = typename node_traits<next_chain_t>::current_type;
+
+        constexpr std::size_t tail_index =
+            node_traits<typename list_traits<HEAD>::chain_type>::size - 1;
+        const uint32_t next_chain_offset =
+            base_offset +
+            offsetof(group_t, tail) +
+            offsetof(tail_group_t, head) +
+            offsetof(NEXT, chain);
+
+        chain_node_at<tail_index>(group.head.chain).current.CLLR =
+            start_cllr<next_lli_t>(next_chain_offset);
+    }
+
+    connect_program_lists(
+        group.tail,
+        base_offset + offsetof(group_t, tail)
+    );
 }
 
 template<
@@ -903,12 +1289,10 @@ constexpr void fixup_group(
 
     // このチェーンの開始位置を、入れ子グループのオフセットに加算する。
     fixup_chain(
-        group.head,
+        group.head.chain,
         base_offset +
-        offsetof(
-            group_t,
-            head
-        )
+        offsetof(group_t, head) +
+        offsetof(HEAD, chain)
     );
 
     // tailの実オフセットを次の再帰に渡し、ROOT基準の位置を保つ。
@@ -925,34 +1309,17 @@ constexpr void fixup_group(
     );
 }
 
-template<
-    typename HEAD,
-    typename... TAIL
->
-constexpr bool group_links_valid(
-    const lli_group<HEAD, TAIL...>& group,
-    uint32_t base_offset
-)
-{
-    using group_t = lli_group<HEAD, TAIL...>;
-    const uint32_t chain_offset =
-        base_offset + offsetof(group_t, head);
-    const uint32_t next_group_offset =
-        base_offset + offsetof(group_t, tail);
-
-    return
-        chain_links_valid(group.head, chain_offset) &&
-        group_links_valid(group.tail, next_group_offset);
-}
-
 // チェーンをグループに格納し、各CLLRをROOT基準の位置で設定する
-template<LLIChainType... CHAINS>
-    requires (sizeof...(CHAINS) > 0)
+template<typename... LISTS>
+    requires (
+        sizeof...(LISTS) > 0 &&
+        (requires { typename list_traits<LISTS>::chain_type; } && ...)
+    )
 constexpr auto make_lli_group(
-    CHAINS... chains
+    LISTS... lists
 )
 {
-    using root_t = lli_group<CHAINS...>;
+    using root_t = lli_group<LISTS...>;
 
     static_assert(
         std::is_standard_layout_v<root_t>,
@@ -966,14 +1333,15 @@ constexpr auto make_lli_group(
     auto root =
         root_t
         {
-            chains...
+            lists...
         };
 
     fixup_group(root, 0);
+    connect_program_lists(root, 0);
 
     // 定数評価中に不整合があればコンパイルエラーにする。
     // 実行時生成でも不整合を検出できるよう、失敗時は停止する。
-    if (!group_links_valid(root, 0))
+    if (!validate_root(root))
     {
         __builtin_trap();
     }
