@@ -3,12 +3,12 @@
 #include <cstdint>
 #include <cstddef>
 #include <concepts>
+#include <tuple>
 #include <type_traits>
 
 #include "gpdma_lli_t.hpp"
 
 // CLLRの各レジスタ更新フラグ
-
 namespace GPDMA_Flag
 {
     constexpr uint32_t ULL = (1UL << 16);
@@ -279,12 +279,19 @@ struct start_at
 
 // Program/Listタグと物理チェーンを結び付ける。
 // タグは型情報だけに使い、ROOTにはチェーンのレジスタ像だけを保持する。
-template<typename ProgramTag, typename ListTag, typename Chain>
+template<
+    typename ProgramTag,
+    typename ListTag,
+    typename Chain,
+    bool ExplicitEnd = false
+>
 struct lli_list
 {
     using program_tag = ProgramTag;
     using list_tag = ListTag;
     using chain_type = Chain;
+
+    static constexpr bool explicit_end = ExplicitEnd;
 
     Chain chain;
 };
@@ -295,20 +302,123 @@ constexpr auto make_list(Chain chain)
     return lli_list<ProgramTag, ListTag, Chain>{chain};
 }
 
+// 単一Program用の簡易APIで内部補完するProgramタグ。
+struct default_program_tag
+{
+};
+
+// 完全タグ無しListを名前付き位置APIの対象外として識別する。
+template<typename Chain>
+struct anonymous_list_tag
+{
+};
+
+// Programタグだけを省略し、Listタグによる名前付き位置指定を維持する。
+template<typename ListTag, typename Chain>
+constexpr auto make_list(Chain chain)
+{
+    return make_list<default_program_tag, ListTag>(chain);
+}
+
+// Program/Listタグを両方省略する。
+// Chain型が同じListを複数含めても、名前付き位置APIを使わないため許可する。
+template<typename Chain>
+constexpr auto make_list(Chain chain)
+{
+    return make_list<default_program_tag, anonymous_list_tag<Chain>>(chain);
+}
+
+// List末尾を同一Program内の次Listへ自動接続しない。
+template<
+    typename ProgramTag,
+    typename ListTag,
+    typename Chain,
+    bool ExplicitEnd
+>
+constexpr auto end_list(
+    const lli_list<ProgramTag, ListTag, Chain, ExplicitEnd>& list
+)
+{
+    return lli_list<ProgramTag, ListTag, Chain, true>{list.chain};
+}
+
+// 任意のタグに再利用時のインスタンス識別子を付加する。
+template<typename InstanceTag, typename Tag>
+struct instanced_tag
+{
+    using instance_tag = InstanceTag;
+    using base_tag = Tag;
+};
+
 template<typename T>
 struct list_traits;
 
-template<typename ProgramTag, typename ListTag, typename Chain>
-struct list_traits<lli_list<ProgramTag, ListTag, Chain>>
+template<
+    typename ProgramTag,
+    typename ListTag,
+    typename Chain,
+    bool ExplicitEnd
+>
+struct list_traits<lli_list<ProgramTag, ListTag, Chain, ExplicitEnd>>
 {
     using program_tag = ProgramTag;
     using list_tag = ListTag;
     using chain_type = Chain;
+
+    static constexpr bool explicit_end = ExplicitEnd;
 };
+
+template<typename T>
+struct is_anonymous_list_tag : std::false_type
+{
+};
+
+template<typename Chain>
+struct is_anonymous_list_tag<anonymous_list_tag<Chain>> : std::true_type
+{
+};
+
+template<typename T>
+inline constexpr bool is_anonymous_list_tag_v =
+    is_anonymous_list_tag<T>::value;
+
+template<typename... LISTS>
+struct unique_program_list_tags : std::true_type
+{
+};
+
+template<typename HEAD, typename... TAIL>
+struct unique_program_list_tags<HEAD, TAIL...>
+    : std::bool_constant<
+        (is_anonymous_list_tag_v<typename list_traits<HEAD>::list_tag> ||
+         (!(std::is_same_v<
+                typename list_traits<HEAD>::program_tag,
+                typename list_traits<TAIL>::program_tag
+            > &&
+            std::is_same_v<
+                typename list_traits<HEAD>::list_tag,
+                typename list_traits<TAIL>::list_tag
+            >) && ...)) &&
+        unique_program_list_tags<TAIL...>::value
+    >
+{
+};
+
+template<typename... LISTS>
+inline constexpr bool unique_program_list_tags_v =
+    unique_program_list_tags<LISTS...>::value;
 
 // 複数の名前付きListをhead/tailの入れ子で保持する。
 template<typename... LISTS>
 struct lli_group;
+
+// ROOT化前のProgramを完成済みROOTと型で区別する。
+// instantiated=trueのProgramは直接再instantiateできず、一度ROOT化する必要がある。
+template<bool instantiated, typename... LISTS>
+struct lli_program
+{
+    lli_group<LISTS...> lists;
+};
 
 template<>
 struct lli_group<>
@@ -528,6 +638,25 @@ struct node_position_traits<
     static constexpr std::size_t node_index = 0;
 };
 
+template<bool Valid, std::size_t ChainIndex, typename GROUP>
+struct list_tail_node_index
+{
+    static constexpr std::size_t value = 0;
+};
+
+template<std::size_t ChainIndex, typename GROUP>
+struct list_tail_node_index<true, ChainIndex, GROUP>
+{
+    using chain_type =
+        typename group_chain_type<
+            ChainIndex,
+            GROUP
+        >::type;
+
+    static constexpr std::size_t value =
+        node_traits<chain_type>::size - 1;
+};
+
 template<typename ProgramTag, typename ListTag, typename GROUP>
 struct node_position_traits<
     list_tail<ProgramTag, ListTag>,
@@ -543,12 +672,11 @@ struct node_position_traits<
             std::remove_cvref_t<GROUP>
         >::value;
     static constexpr std::size_t node_index =
-        node_traits<
-            typename group_chain_type<
-                chain_index,
-                std::remove_cvref_t<GROUP>
-            >::type
-        >::size - 1;
+        list_tail_node_index<
+            valid,
+            chain_index,
+            std::remove_cvref_t<GROUP>
+        >::value;
 };
 
 template<std::size_t ChainIndex, std::size_t NodeIndex, typename GROUP>
@@ -1245,7 +1373,8 @@ constexpr void connect_program_lists(
         std::is_same_v<
             typename list_traits<HEAD>::program_tag,
             typename list_traits<NEXT>::program_tag
-        >
+        > &&
+        !list_traits<HEAD>::explicit_end
     )
     {
         using next_chain_t = typename list_traits<NEXT>::chain_type;
@@ -1309,18 +1438,118 @@ constexpr void fixup_group(
     );
 }
 
-// チェーンをグループに格納し、各CLLRをROOT基準の位置で設定する
+// lli_groupをList列へ戻す。連結後はROOT全体を再構築し、CLLRを再計算する。
+constexpr auto group_lists(const lli_group<>&)
+{
+    return std::tuple{};
+}
+
+template<typename HEAD, typename... TAIL>
+constexpr auto group_lists(const lli_group<HEAD, TAIL...>& group)
+{
+    return std::tuple_cat(
+        std::tuple{group.head},
+        group_lists(group.tail)
+    );
+}
+
+template<bool instantiated, typename... LISTS>
+constexpr auto group_lists(const lli_program<instantiated, LISTS...>& program)
+{
+    return group_lists(program.lists);
+}
+
+template<
+    typename InstanceTag,
+    typename ProgramTag,
+    typename ListTag,
+    typename Chain,
+    bool ExplicitEnd
+>
+constexpr auto instantiate_list(
+    const lli_list<ProgramTag, ListTag, Chain, ExplicitEnd>& list
+)
+{
+    using instanced_list_t = lli_list<
+        instanced_tag<InstanceTag, ProgramTag>,
+        ListTag,
+        Chain,
+        ExplicitEnd
+    >;
+
+    return instanced_list_t{list.chain};
+}
+
+template<typename InstanceTag, typename... LISTS>
+constexpr auto instantiate_lists(const lli_group<LISTS...>& group)
+{
+    return std::apply(
+        []<typename... SOURCE_LISTS>(SOURCE_LISTS... lists)
+        {
+            return lli_program<
+                true,
+                decltype(instantiate_list<InstanceTag>(lists))...
+            >{
+                lli_group<decltype(instantiate_list<InstanceTag>(lists))...>{
+                    instantiate_list<InstanceTag>(lists)...
+                }
+            };
+        },
+        group_lists(group)
+    );
+}
+
+// 未instantiateのProgram、または完成済みROOTだけに新しいインスタンスタグを付ける。
+template<typename InstanceTag, typename... LISTS>
+constexpr auto instantiate(const lli_program<false, LISTS...>& program)
+{
+    return instantiate_lists<InstanceTag>(program.lists);
+}
+
+template<typename InstanceTag, typename... LISTS>
+constexpr auto instantiate(const lli_group<LISTS...>& root)
+{
+    return instantiate_lists<InstanceTag>(root);
+}
+
+// List列をプログラム単位で保持する。ROOTとしてのfixupは行わない。
 template<typename... LISTS>
     requires (
         sizeof...(LISTS) > 0 &&
         (requires { typename list_traits<LISTS>::chain_type; } && ...)
     )
-constexpr auto make_lli_group(
-    LISTS... lists
-)
+constexpr auto make_lli_program(LISTS... lists)
+{
+    using first_list_t = std::tuple_element_t<0, std::tuple<LISTS...>>;
+    using program_tag_t = typename list_traits<first_list_t>::program_tag;
+
+    static_assert(
+        (std::is_same_v<
+            program_tag_t,
+            typename list_traits<LISTS>::program_tag
+        > && ...),
+        "All Lists in one Program must have the same ProgramTag"
+    );
+
+    return lli_program<false, LISTS...>{
+        lli_group<LISTS...>{lists...}
+    };
+}
+
+// チェーンをグループに格納し、各CLLRをROOT基準の位置で設定する。
+template<typename... LISTS>
+    requires (
+        sizeof...(LISTS) > 0 &&
+        (requires { typename list_traits<LISTS>::chain_type; } && ...)
+    )
+constexpr auto make_lli_group(LISTS... lists)
 {
     using root_t = lli_group<LISTS...>;
 
+    static_assert(
+        unique_program_list_tags_v<LISTS...>,
+        "ProgramTag/ListTag pair must be unique in one ROOT"
+    );
     static_assert(
         std::is_standard_layout_v<root_t>,
         "LLI group must have a standard memory layout"
@@ -1330,11 +1559,7 @@ constexpr auto make_lli_group(
         "LLI group must fit within the 16-bit CLLR.LA offset range"
     );
 
-    auto root =
-        root_t
-        {
-            lists...
-        };
+    auto root = root_t{lists...};
 
     fixup_group(root, 0);
     connect_program_lists(root, 0);
@@ -1347,4 +1572,30 @@ constexpr auto make_lli_group(
     }
 
     return root;
+}
+
+// プログラム、または完成済みROOTを末尾方向に平坦化して一つのROOTにする。
+template<typename... GROUPS>
+    requires (
+        sizeof...(GROUPS) > 0 &&
+        (requires(GROUPS group) { group_lists(group); } && ...)
+    )
+constexpr auto make_lli_group(GROUPS... groups)
+{
+    return std::apply(
+        []<typename... LISTS>(LISTS... lists)
+        {
+            return make_lli_group(lists...);
+        },
+        std::tuple_cat(group_lists(groups)...)
+    );
+}
+
+template<typename... LEFT, typename... RIGHT>
+constexpr auto append_lli_group(
+    const lli_group<LEFT...>& left,
+    const lli_group<RIGHT...>& right
+)
+{
+    return make_lli_group(left, right);
 }

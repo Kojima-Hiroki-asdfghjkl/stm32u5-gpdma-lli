@@ -2,17 +2,10 @@
 
 [English](#english) | [日本語](#日本語)
 
-> **Status: v2.0.0-beta.1 development record**
+> **Status: v2.0.0-beta.2**
 >
-> This directory preserves the hardware-verified beta.1 implementation of the
-> STM32U575 self-modifying GPDMA descriptor dispatcher. The implementation now
-> uses named Program/List/Node positions, automatic same-Program List linking,
-> static descriptor-ring initialization, and link-time completion of selector
-> addresses.
->
-> The observed DMA and SPI behavior is intentionally unchanged from
-> v2.0.0-alpha.1. beta.1 changes the construction API and initialization model,
-> not the verified transfer sequence.
+> This README documents the current API, example, validation results, known
+> limitations, and remaining work toward the release candidate.
 
 ---
 
@@ -21,7 +14,7 @@
 ## Overview
 
 This example demonstrates a self-modifying STM32U575 GPDMA linked-list
-sequence using the v2.0.0-beta.1 library model.
+sequence using the v2.0.0-beta.2 library model.
 
 After the CPU prepares the channel register file, loads the named entry point,
 and enables GPDMA1 Channel 0, GPDMA repeatedly performs the following sequence
@@ -35,7 +28,7 @@ without further CPU descriptor selection:
 6. Updates the GPIO control signal.
 7. Returns to the selector and repeats.
 
-The descriptor sequence reproduced during the beta.1 hardware test is unchanged
+The descriptor sequence reproduced during the beta.2 hardware test is unchanged
 from alpha.1:
 
 | Descriptor | Source offset | Length | Observed MOSI data |
@@ -47,15 +40,16 @@ from alpha.1:
 
 After descriptor 3, the ring returns to descriptor 0.
 
-`DUMMY` is the beta.1 name of the sequential 256-byte test data corresponding
-to `TEST_DATA` in the alpha.1 experiment.
+`DUMMY` is the v2 example's name for the sequential 256-byte test data
+corresponding to `TEST_DATA` in the alpha.1 experiment.
 
 ## What changed from alpha.1
 
 The DMA behavior and observed SPI sequence are the same as alpha.1. beta.1
-changes how the graph is described and initialized.
+changed how the graph is described and initialized; beta.2 extends that API
+without changing the transfer sequence.
 
-### Added in beta.1
+### Introduced in beta.1 and extended in beta.2
 
 - Named logical positions using:
 
@@ -181,7 +175,7 @@ SRAM2 ROOT image:
 `executor.CLLR` remains outside the rewrite window. The executor therefore
 retains its statically generated link to the following List.
 
-For v2.0.0-beta.1, hardware validation is limited to:
+For v2.0.0-beta.2, hardware validation is limited to:
 
 ```cpp
 DESC_12BSD_t
@@ -273,7 +267,7 @@ No descriptor or selector connection function is called from `userMain()`.
 
 ## SRAM2 execution image
 
-The beta.1 hardware-test application places the writable ROOT in an initialized
+The beta.2 hardware-test application places the writable ROOT in an initialized
 `.SRAM2` output section:
 
 ```ld
@@ -307,7 +301,7 @@ SystemInit()
 ```
 
 This linker and startup arrangement is an application-side integration
-condition used for the beta.1 hardware test, not a requirement to adopt the
+condition used for the beta.2 hardware test, not a requirement to adopt the
 test application's complete linker script. Integrate the initialized SRAM2
 section and its startup copy into the target application's existing memory
 layout.
@@ -346,7 +340,7 @@ GPDMA1_Channel0->CCR |= 0x0000'0001u; // EN
 
 ## Same observed behavior as alpha.1
 
-beta.1 was tested on the STM32U575 hardware and produced the same descriptor
+beta.2 was tested on the STM32U575 hardware and produced the same descriptor
 order, MOSI data, and GPIO behavior as alpha.1.
 
 The following remain unchanged:
@@ -362,8 +356,8 @@ The following remain unchanged:
 - CPU-free descriptor selection after DMA startup.
 
 The capture files preserved here were recorded for alpha.1. They document the
-expected externally observable sequence, which was reproduced during the beta.1
-hardware test. They are not newly recorded beta.1 measurements.
+expected externally observable sequence, which was reproduced during the beta.2
+hardware test. They are not newly recorded beta.2 measurements.
 
 ## Verified platform configuration
 
@@ -386,7 +380,7 @@ a minimal reusable platform layer.
 
 ## Source snapshot
 
-The development-record snapshot contains:
+The beta.2 release snapshot contains:
 
 - `include/gpdma_lli.hpp`
 - `include/gpdma_lli_t.hpp`
@@ -398,8 +392,8 @@ The development-record snapshot contains:
 - `example/STM32U575xx_FLASH.ld`
 
 The versioned `user_main` files preserve the application code used for each
-development stage. The beta.1 hardware test uses
-`v2_0_0_beta_1_user_main.cpp`.
+development stage. The beta.2 hardware test uses
+`v2_0_0_beta_2_user_main.cpp`.
 
 The files in `example/` show the startup and linker integration required to
 load the initialized `.SRAM2` execution image from Flash. They are integration
@@ -411,7 +405,7 @@ generic GPDMA LLI library API.
 ## Logic capture
 
 The files in `capture/` are the alpha.1 measurements described above. They are
-retained as the reference record for the sequence reproduced by beta.1.
+retained as the reference record for the sequence reproduced by beta.2.
 
 ### Files
 
@@ -469,30 +463,85 @@ Revalidate when changing:
 - DMA request configuration;
 - clock configuration.
 
-## beta.1 limitations
+## Current limitations
 
-- The Program/List/Node public API is still under development.
-- For v2.0.0-beta.1, hardware validation is limited to `DESC_12BSD_t`
-  descriptor executor images.
+- The Program/List/Node public API is implemented but not yet frozen for RC.
+- The supported descriptor executor image type for v2.0.0 is limited to
+  `DESC_12BSD_t`.
 - `executor.CLLR` is not part of the descriptor rewrite window.
-- Program/List tag duplication checks are not complete.
 - Invalid `list_tail` diagnostics may still produce deep template errors.
-- Optimization and LTO regression testing is not yet complete.
 - The platform initialization is preserved from the original application and
   is not minimal.
 - SPI completion depends on undocumented observed hardware behavior.
 
+Program/List tag duplication checks, automatic adjacent-List connection,
+explicit termination, and their compile tests are implemented.
+
+## beta.2 validation status
+
+The beta.2 snapshot records the implemented Program/List API, negative compile
+tests, optimization/LTO matrix, ELF inspection, static relocation probe,
+hardware operation, cold boot, software reset, Program-to-Program transitions,
+explicit termination, descriptor-ring traversal, and a 30-minute continuous
+run.
+
+The optimization/LTO matrix covers `-O0`, `-Og`, `-O2`, `-O3`, `-Os`,
+`-O3 -flto`, and `-Os -flto`. Acceptance requires successful build and static
+image generation, correct `.SRAM2` VMA/LMA and relocation, no dynamic
+initializer for the ROOT image, and successful real-hardware operation.
+
+## Related documentation
+
+- [`usage-guide.md`](usage-guide.md) is the usage guide. It intentionally
+  contains no release progress or remaining-work tracking and refers here for
+  the current public release state.
+- `gpdma_lli_v2_design_decisions.md` preserves detailed design rationale,
+  alternatives, validation criteria, and release-boundary reasoning. This
+  README remains authoritative for public release status.
+- `gpdma_lli_v2_development_status.md` is frozen as the beta.2 development
+  snapshot. Later release-state changes are recorded here rather than by
+  updating that snapshot.
+
 ## Remaining work before the release candidate
 
-- Complete Program/List tag duplication checks.
-- Improve invalid `list_tail` diagnostics.
-- Finalize the Program/List public API.
-- Add negative compile tests for named positions and dispatch layout.
-- Test `-O0`, `-Og`, `-O2`, `-O3`, `-Os`, `-O3 -flto`, and `-Os -flto`.
-- Verify `.SRAM2` VMA/LMA and all relevant relocations for representative
-  builds.
-- Confirm that no ROOT-specific dynamic initializer is generated.
-- Repeat representative hardware tests after API freeze.
+### v2.0.0-beta.3: finalized ROOT boundary
+
+- Introduce `finalize_lli_group()` and give the finalized ROOT a type distinct
+  from the mutable construction-stage ROOT.
+- Keep validation, named-position lookup, node access,
+  `descriptor_dispatch_layout`, and DMA placement available after finalization.
+- Reject `append_lli_group()`, `patch_jump()`, and repeated finalization for a
+  finalized ROOT at compile time.
+- Add small positive and negative compile tests for the finalized ROOT
+  lifecycle.
+- Confirm that finalization adds no runtime data and causes no size, layout,
+  static-initialization, or generated-code regression.
+
+### v2.0.0-beta.4: descriptor API freeze
+
+- Decide whether the descriptor owns the complete executor image, including
+  `CLLR`, and document which fields are controlled by the descriptor and ROOT.
+- Fix the public descriptor-step representation and its `sizeof`, `alignof`,
+  field offsets, and standard-layout requirements with `static_assert`.
+- Derive the selector copy start and size from types rather than handwritten
+  constants.
+- Reject unsupported executor image formats at compile time and remove
+  `DESC_12BSD_t` from public template arguments where it can be inferred.
+- Confirm that descriptor-ring and ROOT references remain `constinit` and use
+  static relocation.
+
+### v2.0.0-rc.1: release qualification
+
+- Freeze the Program/List, finalized ROOT, and descriptor public APIs.
+- Finalize failure diagnostics and positive and negative compile tests.
+- Decide whether `Src/gpdma_static_relocation_probe.cpp` is included in the
+  final release or kept as validation-only code.
+- Investigate the Release-link `LOAD segment with RWX permissions` warning and
+  decide whether to accept or fix it.
+- Repeat the optimization/LTO matrix, representative Release build, ELF and
+  relocation inspection, hardware operation, software reset, cold boot, and
+  continuous-run tests after the API freeze.
+- Update the README and usage guide to match the frozen API.
 
 ## Directory contents
 
@@ -511,28 +560,27 @@ stm32u575_spi_descriptor_dispatch/
 │   └── stm32u575_spi_t.hpp
 ├── original_init.hpp
 ├── README.md
+├── usage-guide.md
 ├── v2_0_0_alpha_1_user_main.cpp
-└── v2_0_0_beta_1_user_main.cpp
+├── v2_0_0_beta_1_user_main.cpp
+└── v2_0_0_beta_2_user_main.cpp
 ```
 
-This directory is a development record. The implementation snapshot may be
-removed from the latest branch after the behavior is incorporated into the
-final v2 public API. The beta.1 tag and Git history preserve this revision.
+This directory is the v2.0.0-beta.2 release snapshot. The versioned
+`user_main` files and Git history preserve the earlier development stages.
 
 ---
 
 # 日本語
 
+> **ステータス: v2.0.0-beta.2**
+>
+> このREADMEは、現行API、サンプル、検証結果、既知の制限、および
+> リリース候補版までの残作業を記載しています。
+
 ## 概要
 
-このディレクトリは、v2.0.0-beta.1時点のSTM32U575 GPDMA自己書き換え型
-descriptor dispatcherについて、実機確認済みのコードと構築方式を保存する
-開発記録です。
-
-beta.1では、Program/List/Nodeの名前付き位置、同一Program内Listの自動接続、
-descriptor ringの静的初期化、selectorアドレスのリンク時解決を導入しました。
-
-**DMAとSPIの観測動作はv2.0.0-alpha.1と同一です。** beta.1で変更したのは
+**DMAとSPIの観測動作はv2.0.0-alpha.1と同一です。** v2で変更したのは
 グラフの構築APIと初期化方式であり、descriptor順序、SPI転送内容、GPIO波形、
 自己書き換えシーケンスの動作仕様は変更していません。
 
@@ -547,7 +595,7 @@ GPDMAがCPUによるdescriptor選択なしで次を繰り返します。
 6. GPIO制御信号を更新する。
 7. selectorへ戻り、次のdescriptorを処理する。
 
-beta.1の実機試験で再現したdescriptor順序は、alpha.1から変更ありません。
+beta.2の実機試験で再現したdescriptor順序は、alpha.1から変更ありません。
 
 | Descriptor | 送信元オフセット | 長さ | 観測したMOSIデータ |
 |---:|---:|---:|---|
@@ -558,14 +606,15 @@ beta.1の実機試験で再現したdescriptor順序は、alpha.1から変更あ
 
 Descriptor 3の実行後はdescriptor 0へ戻ります。
 
-`DUMMY`は、alpha.1の`TEST_DATA`に相当する0から255までの連続した
-256バイトのテストデータです。
+`DUMMY`は、alpha.1の`TEST_DATA`に相当する、v2サンプルでの0から255までの
+連続した256バイトのテストデータです。
 
 ## alpha.1からの変更点
 
-DMAの実行結果はalpha.1と同じですが、構築方法をv2設計へ移行しました。
+DMAの実行結果はalpha.1と同じです。beta.1で構築方法をv2設計へ移行し、
+beta.2では転送シーケンスを変えずにAPIを拡張しました。
 
-### beta.1で追加したもの
+### beta.1で導入し、beta.2で拡張したもの
 
 - 次の形式による名前付き論理位置：
 
@@ -688,7 +737,7 @@ selectorは、現在のdescriptorからSRAM2上のROOTイメージへ正確に32
 `executor.CLLR`は書き換え範囲外です。このためexecutorは、静的に生成された
 後続Listへのリンクを保持します。
 
-v2.0.0-beta.1で検証対象とするdescriptor executor image型は次に限定します。
+v2.0.0-beta.2で検証対象とするdescriptor executor image型は次に限定します。
 
 ```cpp
 DESC_12BSD_t
@@ -779,7 +828,7 @@ SRAM2実行ROOTの配置後に最終アドレスを解決します。
 
 ## SRAM2実行イメージ
 
-beta.1の実機試験アプリケーションでは、書き換え可能ROOTを初期値付きの`.SRAM2`
+beta.2の実機試験アプリケーションでは、書き換え可能ROOTを初期値付きの`.SRAM2`
 出力セクションへ配置します。
 
 ```ld
@@ -812,7 +861,7 @@ SystemInit()
     -> main()
 ```
 
-このリンカ設定とstartup処理は、beta.1の実機試験で使用したアプリケーション側の
+このリンカ設定とstartup処理は、beta.2の実機試験で使用したアプリケーション側の
 統合条件です。試験アプリケーションのリンカスクリプト全体を採用する必要は
 ありません。対象アプリケーションの既存メモリ配置へ、初期値付きSRAM2セクションと
 起動時コピーを統合してください。
@@ -851,7 +900,7 @@ GPDMA1_Channel0->CCR |= 0x0000'0001u; // EN
 
 ## alpha.1と同一の観測動作
 
-beta.1をSTM32U575実機で動作確認し、alpha.1と同じdescriptor順序、MOSIデータ、
+beta.2をSTM32U575実機で動作確認し、alpha.1と同じdescriptor順序、MOSIデータ、
 GPIO動作を再現することを確認しました。
 
 変更していない項目：
@@ -866,8 +915,8 @@ GPIO動作を再現することを確認しました。
 - descriptor 3からdescriptor 0への循環
 - DMA開始後のCPU非介在descriptor選択
 
-ここに保存するcaptureファイルはalpha.1で取得したものです。これらはbeta.1でも
-再現を確認した外部観測シーケンスの参照記録ですが、beta.1で新たに取得した
+ここに保存するcaptureファイルはalpha.1で取得したものです。これらはbeta.2でも
+再現を確認した外部観測シーケンスの参照記録ですが、beta.2で新たに取得した
 測定ファイルではありません。
 
 ## 実機確認時の構成
@@ -891,7 +940,7 @@ layerではありません。
 
 ## ソーススナップショット
 
-開発記録スナップショットには次を含めます。
+beta.2リリーススナップショットには次を含めます。
 
 - `include/gpdma_lli.hpp`
 - `include/gpdma_lli_t.hpp`
@@ -903,8 +952,8 @@ layerではありません。
 - `example/STM32U575xx_FLASH.ld`
 
 バージョン名を付けた`user_main`ファイルには、各開発段階で使用した
-アプリケーションコードを保存しています。beta.1の実機確認には
-`v2_0_0_beta_1_user_main.cpp`を使用しています。
+アプリケーションコードを保存しています。beta.2の実機確認には
+`v2_0_0_beta_2_user_main.cpp`を使用しています。
 
 `example/`のファイルは、初期化済み`.SRAM2`実行イメージをFlashからロードする
 ために必要なstartupおよびlinker統合例です。完全な単独実行サンプルではなく、
@@ -916,7 +965,7 @@ SPI固有コードは実験用アプリケーションであり、汎用GPDMA LL
 ## Logic capture
 
 `capture/`には、前節で説明したalpha.1の測定ファイルを保存しています。
-beta.1で再現確認したシーケンスの参照記録として維持します。
+beta.2で再現確認したシーケンスの参照記録として維持します。
 
 ### ファイル
 
@@ -973,28 +1022,83 @@ SPI RX DMA要求が1回発生しました。この挙動はRMまたはデータ�
 - DMA request設定
 - クロック設定
 
-## beta.1の既知の制限
+## 現在の既知の制限
 
-- Program/List/Node公開APIは開発中です。
-- v2.0.0-beta.1で検証対象とするdescriptor executor image型は
+- Program/List/Node公開APIは実装済みですが、RC前のAPI凍結は未完了です。
+- v2.0.0で正式に検証対象とするdescriptor executor image型は
   `DESC_12BSD_t`のみです。
 - `executor.CLLR`はdescriptor書き換え範囲に含みません。
-- Program/Listタグ重複検査は未完成です。
 - 不正な`list_tail`指定では、深いテンプレートエラーになる場合があります。
-- 最適化およびLTO回帰試験は未完了です。
 - platform初期化は元アプリケーション由来で、最小構成ではありません。
 - SPI完了処理は仕様書に記載のない実測挙動に依存します。
 
-## RCまでの残作業
+Program/Listタグ重複検査、Listの意味単位への再編、隣接Listの自動接続、
+`end_list()`および`patch_end()`による明示終端は実装済みです。
 
-- Program/Listタグ重複検査を完成する。
-- 不正な`list_tail`指定の診断を改善する。
-- Program/List公開APIを確定する。
-- 名前付き位置とdispatcherレイアウトの負のコンパイル試験を追加する。
-- `-O0`、`-Og`、`-O2`、`-O3`、`-Os`、`-O3 -flto`、`-Os -flto`を確認する。
-- 代表ビルドの`.SRAM2` VMA/LMAとリロケーションを検査する。
-- ROOT用の動的初期化関数が生成されないことを確認する。
-- API凍結後に代表的な実機試験を再実行する。
+## beta.2検証状況
+
+beta.2では、Program/List API、負のコンパイル試験、最適化・LTO回帰、
+ELF検査、静的リロケーションprobe、実機動作、コールドブート、
+ソフトウェアリセット、Program間遷移、明示終端、descriptor ring周回、
+30分間の連続動作を確認済みの結果として記録します。
+
+最適化・LTO回帰試験は、`-O0`、`-Og`、`-O2`、`-O3`、`-Os`、
+`-O3 -flto`、`-Os -flto`を対象とします。各条件の合格には、ビルドと静的
+イメージ生成の成功、`.SRAM2`のVMA/LMAとリロケーションの正しさ、ROOT用の
+動的初期化関数が生成されないこと、および実機動作の成功を必要とします。
+
+## 関連文書
+
+- [`usage-guide.md`](usage-guide.md)は使用方法だけを扱います。リリース進捗と
+  残作業は記載せず、現在の公開状態についてこのREADMEを参照します。
+- `gpdma_lli_v2_design_decisions.md`は、設計根拠、代替案、詳細な検証条件、
+  リリース境界の判断を維持します。公開リリース状態の正本はこのREADMEです。
+- `gpdma_lli_v2_development_status.md`はbeta.2時点の開発スナップショットとして
+  凍結します。以後のリリース状態の変更は、このREADMEへ記録します。
+
+## RC判定までの残作業
+
+### v2.0.0-beta.3: finalized ROOT境界
+
+- `finalize_lli_group()`を導入し、finalize前の構築中ROOTとは異なる型を返す。
+- finalize後も検証、名前付き位置検索、ノード参照、
+  `descriptor_dispatch_layout`、DMA配置を使用可能にする。
+- finalized ROOTに対する`append_lli_group()`、`patch_jump()`、二重finalizeを
+  コンパイル時に拒否する。
+- finalized ROOTのライフサイクルについて、小さな正常系・拒否系コンパイル試験を
+  追加する。
+- finalizeによって実行時データが増えず、サイズ、配置、静的初期化、生成コードに
+  退行がないことを確認する。
+
+### v2.0.0-beta.4: descriptor API凍結
+
+- descriptorが`CLLR`を含む完全なexecutor像を所有するかを決定し、
+  descriptorとROOTが決定するフィールドを明文化する。
+- descriptor stepの公開表現を確定し、`sizeof`、`alignof`、フィールドオフセット、
+  standard-layout要件を`static_assert`で固定する。
+- selectorのコピー開始位置とサイズを、手書き定数ではなく型から導出する。
+- 対応外executor image形式をコンパイル時に拒否し、推論可能な箇所では
+  `DESC_12BSD_t`を公開テンプレート引数から除去する。
+- descriptor ringとROOTの参照が`constinit`および静的リロケーションのまま
+  成立することを確認する。
+
+### v2.0.0-rc.1: リリース判定
+
+- Program/List、finalized ROOT、descriptorの公開APIを凍結する。
+- 公開APIの失敗時診断と正常系・拒否系コンパイル試験を最終確認する。
+- 静的リロケーションprobeを最終リリースへ含めるか、検証専用に分離するかを
+  確定する。
+- Releaseリンク時の`LOAD segment with RWX permissions`警告を判断する。
+- API凍結後に最適化・LTOマトリクス、代表的なReleaseビルド、ELF・
+  リロケーション検査、実機動作、ソフトウェアリセット、コールドブート、
+  連続動作試験を再実行する。
+- READMEと使用ガイドを凍結後のAPIへ更新する。
+
+最適化・LTO回帰試験は、`-O0`、`-Og`、`-O2`、`-O3`、`-Os`、
+`-O3 -flto`、`-Os -flto`で実施済みである。各条件でビルド、静的初期化、
+実機動作に加え、`.SRAM2`のVMA/LMA、リロケーション、およびROOT用の
+動的初期化関数が生成されないことを確認した。電源断後のコールドブートと
+30分間の連続動作も確認済みである。
 
 ## ディレクトリ構成
 
@@ -1013,10 +1117,12 @@ stm32u575_spi_descriptor_dispatch/
 │   └── stm32u575_spi_t.hpp
 ├── original_init.hpp
 ├── README.md
+├── usage-guide.md
 ├── v2_0_0_alpha_1_user_main.cpp
-└── v2_0_0_beta_1_user_main.cpp
+├── v2_0_0_beta_1_user_main.cpp
+└── v2_0_0_beta_2_user_main.cpp
 ```
 
-このディレクトリは開発記録です。最終v2公開APIへ機能を統合した後、実装スナップ
-ショットを最新ブランチから削除する場合があります。beta.1タグとGit履歴から、この
-時点の実装を参照できます。
+このディレクトリはv2.0.0-beta.2のリリーススナップショットです。
+バージョン名を付けた`user_main`ファイルとGit履歴から、以前の開発段階も
+参照できます。
