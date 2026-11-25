@@ -19,15 +19,15 @@ MEMORY
   ROM       (rx)  : ORIGIN = 0x08000000, LENGTH = 2048K
   
   /* --- 1. 手動固定エリア（フレームバッファ用：自動配置しない） --- */
-  SRAM1_FB  (xrw) : ORIGIN = 0x20000000, LENGTH = 128K
-  SRAM3_FB  (xrw) : ORIGIN = 0x20040000, LENGTH = 384K
+  SRAM1_FB  (rw) : ORIGIN = 0x20000000, LENGTH = 128K
+  SRAM3_FB  (rw) : ORIGIN = 0x20040000, LENGTH = 384K
 
   /* --- 2. 自動配置用エリア --- */
-  SRAM1     (xrw) : ORIGIN = 0x20020000, LENGTH = 64K
-  SRAM2     (xrw) : ORIGIN = 0x20030000, LENGTH = 64K
-  SRAM3     (xrw) : ORIGIN = 0x200A0000, LENGTH = 128K
+  SRAM1     (rw) : ORIGIN = 0x20020000, LENGTH = 64K
+  SRAM2     (rw) : ORIGIN = 0x20030000, LENGTH = 64K
+  SRAM3     (rw) : ORIGIN = 0x200A0000, LENGTH = 128K
   
-  SRAM4     (xrw) : ORIGIN = 0x28000000, LENGTH = 16K
+  SRAM4     (rw) : ORIGIN = 0x28000000, LENGTH = 16K
 }
 
 /* Highest address of the user mode stack (SRAM3の末尾に配置) */
@@ -71,6 +71,14 @@ SECTIONS
     *(.rodata)          /* .rodata sections (constants, strings, etc.) */
     *(.rodata*)         /* .rodata* sections (constants, strings, etc.) */
     . = ALIGN(8);
+  } >ROM
+
+  /* Retain the static relocation probe so its completed image can be inspected. */
+  .gpdma_relocation_probe (READONLY) :
+  {
+    . = ALIGN(4);
+    KEEP(*(.gpdma_relocation_probe))
+    . = ALIGN(4);
   } >ROM
 
   .ARM.extab (READONLY) : 

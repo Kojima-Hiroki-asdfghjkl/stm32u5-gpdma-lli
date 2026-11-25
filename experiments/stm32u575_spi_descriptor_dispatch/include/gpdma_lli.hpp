@@ -277,17 +277,17 @@ struct start_at
     static constexpr std::size_t index = Index;
 };
 
-// Program/Listタグと物理チェーンを結び付ける。
+// Group/Listタグと物理チェーンを結び付ける。
 // タグは型情報だけに使い、ROOTにはチェーンのレジスタ像だけを保持する。
 template<
-    typename ProgramTag,
+    typename GroupTag,
     typename ListTag,
     typename Chain,
     bool ExplicitEnd = false
 >
 struct lli_list
 {
-    using program_tag = ProgramTag;
+    using group_tag = GroupTag;
     using list_tag = ListTag;
     using chain_type = Chain;
 
@@ -296,14 +296,14 @@ struct lli_list
     Chain chain;
 };
 
-template<typename ProgramTag, typename ListTag, typename Chain>
+template<typename GroupTag, typename ListTag, typename Chain>
 constexpr auto make_list(Chain chain)
 {
-    return lli_list<ProgramTag, ListTag, Chain>{chain};
+    return lli_list<GroupTag, ListTag, Chain>{chain};
 }
 
-// 単一Program用の簡易APIで内部補完するProgramタグ。
-struct default_program_tag
+// 単一Group用の簡易APIで内部補完するGroupタグ。
+struct default_group_tag
 {
 };
 
@@ -313,33 +313,33 @@ struct anonymous_list_tag
 {
 };
 
-// Programタグだけを省略し、Listタグによる名前付き位置指定を維持する。
+// Groupタグだけを省略し、Listタグによる名前付き位置指定を維持する。
 template<typename ListTag, typename Chain>
 constexpr auto make_list(Chain chain)
 {
-    return make_list<default_program_tag, ListTag>(chain);
+    return make_list<default_group_tag, ListTag>(chain);
 }
 
-// Program/Listタグを両方省略する。
+// Group/Listタグを両方省略する。
 // Chain型が同じListを複数含めても、名前付き位置APIを使わないため許可する。
 template<typename Chain>
 constexpr auto make_list(Chain chain)
 {
-    return make_list<default_program_tag, anonymous_list_tag<Chain>>(chain);
+    return make_list<default_group_tag, anonymous_list_tag<Chain>>(chain);
 }
 
-// List末尾を同一Program内の次Listへ自動接続しない。
+// List末尾を同一Groupタグ内の次Listへ自動接続しない。
 template<
-    typename ProgramTag,
+    typename GroupTag,
     typename ListTag,
     typename Chain,
     bool ExplicitEnd
 >
 constexpr auto end_list(
-    const lli_list<ProgramTag, ListTag, Chain, ExplicitEnd>& list
+    const lli_list<GroupTag, ListTag, Chain, ExplicitEnd>& list
 )
 {
-    return lli_list<ProgramTag, ListTag, Chain, true>{list.chain};
+    return lli_list<GroupTag, ListTag, Chain, true>{list.chain};
 }
 
 // 任意のタグに再利用時のインスタンス識別子を付加する。
@@ -350,18 +350,136 @@ struct instanced_tag
     using base_tag = Tag;
 };
 
+// ROOT内の位置をGroup/ListタグとList内ノード番号で表す。
+template<typename GroupTag, typename ListTag, std::size_t NodeIndex>
+struct node_at
+{
+    using group_tag = GroupTag;
+    using list_tag = ListTag;
+
+    static constexpr std::size_t node_index = NodeIndex;
+};
+
+// Listの先頭または末尾を、Node番号に依存せずに表す。
+template<typename GroupTag, typename ListTag>
+struct list_entry
+{
+    using group_tag = GroupTag;
+    using list_tag = ListTag;
+};
+
+template<typename GroupTag, typename ListTag>
+struct list_tail
+{
+    using group_tag = GroupTag;
+    using list_tag = ListTag;
+};
+
+template<typename T>
+struct is_node_position : std::false_type
+{
+};
+
+template<typename GroupTag, typename ListTag, std::size_t NodeIndex>
+struct is_node_position<node_at<GroupTag, ListTag, NodeIndex>> : std::true_type
+{
+};
+
+template<typename GroupTag, typename ListTag>
+struct is_node_position<list_entry<GroupTag, ListTag>> : std::true_type
+{
+};
+
+template<typename GroupTag, typename ListTag>
+struct is_node_position<list_tail<GroupTag, ListTag>> : std::true_type
+{
+};
+
+template<typename T>
+inline constexpr bool is_node_position_v =
+    is_node_position<std::remove_cvref_t<T>>::value;
+
+template<typename T>
+concept NodePosition = is_node_position_v<T>;
+
+// Group構築時に指定するノード間ジャンプ配線ルール。
+template<NodePosition From, NodePosition To>
+struct jump
+{
+    using from_position = std::remove_cvref_t<From>;
+    using to_position = std::remove_cvref_t<To>;
+};
+
+// Group構築時に指定するノード終端配線ルール。
+template<NodePosition Position>
+struct end_node
+{
+    using position = std::remove_cvref_t<Position>;
+};
+
+template<typename T>
+struct is_wiring_rule : std::false_type
+{
+};
+
+template<NodePosition From, NodePosition To>
+struct is_wiring_rule<jump<From, To>> : std::true_type
+{
+};
+
+template<NodePosition Position>
+struct is_wiring_rule<end_node<Position>> : std::true_type
+{
+};
+
+template<typename T>
+inline constexpr bool is_wiring_rule_v =
+    is_wiring_rule<std::remove_cvref_t<T>>::value;
+
+template<typename T>
+concept WiringRule = is_wiring_rule_v<T>;
+
+template<WiringRule... RULES>
+struct wiring_rules
+{
+};
+
+template<typename... PACKS>
+struct concat_wiring_rules;
+
+template<>
+struct concat_wiring_rules<>
+{
+    using type = wiring_rules<>;
+};
+
+template<WiringRule... RULES>
+struct concat_wiring_rules<wiring_rules<RULES...>>
+{
+    using type = wiring_rules<RULES...>;
+};
+
+template<WiringRule... LEFT, WiringRule... RIGHT, typename... REST>
+struct concat_wiring_rules<wiring_rules<LEFT...>, wiring_rules<RIGHT...>, REST...>
+    : concat_wiring_rules<wiring_rules<LEFT..., RIGHT...>, REST...>
+{
+};
+
+template<typename... PACKS>
+using concat_wiring_rules_t = typename concat_wiring_rules<PACKS...>::type;
+
 template<typename T>
 struct list_traits;
 
 template<
-    typename ProgramTag,
+    typename GroupTag,
     typename ListTag,
     typename Chain,
     bool ExplicitEnd
 >
-struct list_traits<lli_list<ProgramTag, ListTag, Chain, ExplicitEnd>>
+struct list_traits<lli_list<GroupTag, ListTag, Chain, ExplicitEnd>>
 {
-    using program_tag = ProgramTag;
+    using group_tag = GroupTag;
     using list_tag = ListTag;
     using chain_type = Chain;
 
@@ -383,53 +501,105 @@ inline constexpr bool is_anonymous_list_tag_v =
     is_anonymous_list_tag<T>::value;
 
 template<typename... LISTS>
-struct unique_program_list_tags : std::true_type
+struct unique_group_list_tags : std::true_type
 {
 };
 
 template<typename HEAD, typename... TAIL>
-struct unique_program_list_tags<HEAD, TAIL...>
+struct unique_group_list_tags<HEAD, TAIL...>
     : std::bool_constant<
         (is_anonymous_list_tag_v<typename list_traits<HEAD>::list_tag> ||
          (!(std::is_same_v<
-                typename list_traits<HEAD>::program_tag,
-                typename list_traits<TAIL>::program_tag
+                typename list_traits<HEAD>::group_tag,
+                typename list_traits<TAIL>::group_tag
             > &&
             std::is_same_v<
                 typename list_traits<HEAD>::list_tag,
                 typename list_traits<TAIL>::list_tag
             >) && ...)) &&
-        unique_program_list_tags<TAIL...>::value
+        unique_group_list_tags<TAIL...>::value
     >
 {
 };
 
 template<typename... LISTS>
-inline constexpr bool unique_program_list_tags_v =
-    unique_program_list_tags<LISTS...>::value;
+inline constexpr bool unique_group_list_tags_v =
+    unique_group_list_tags<LISTS...>::value;
 
 // 複数の名前付きListをhead/tailの入れ子で保持する。
-template<typename... LISTS>
+template<typename Rules, typename... LISTS>
 struct lli_group;
 
-// ROOT化前のProgramを完成済みROOTと型で区別する。
-// instantiated=trueのProgramは直接再instantiateできず、一度ROOT化する必要がある。
-template<bool instantiated, typename... LISTS>
-struct lli_program
-{
-    lli_group<LISTS...> lists;
-};
+template<typename... LISTS>
+struct finalized_lli_group;
 
-template<>
-struct lli_group<>
+template<typename T>
+struct is_finalized_lli_group : std::false_type
 {
 };
 
-template<typename HEAD, typename... TAIL>
-struct lli_group<HEAD, TAIL...>
+template<typename... LISTS>
+struct is_finalized_lli_group<finalized_lli_group<LISTS...>> : std::true_type
 {
+};
+
+template<typename T>
+inline constexpr bool is_finalized_lli_group_v =
+    is_finalized_lli_group<std::remove_cvref_t<T>>::value;
+
+template<WiringRule... RULES>
+struct lli_group<wiring_rules<RULES...>>
+{
+    using rules_type = wiring_rules<RULES...>;
+};
+
+template<WiringRule... RULES, typename HEAD, typename... TAIL>
+struct lli_group<wiring_rules<RULES...>, HEAD, TAIL...>
+{
+    using rules_type = wiring_rules<RULES...>;
+
     HEAD head;
-    lli_group<TAIL...> tail;
+    lli_group<wiring_rules<>, TAIL...> tail;
+};
+
+template<typename Rules>
+constexpr auto make_raw_lli_group()
+{
+    return lli_group<Rules>{};
+}
+
+template<typename Rules, typename HEAD, typename... TAIL>
+constexpr auto make_raw_lli_group(const HEAD& head, const TAIL&... tail)
+{
+    return lli_group<Rules, HEAD, TAIL...>{
+        head,
+        make_raw_lli_group<wiring_rules<>>(tail...)
+    };
+}
+
+template<typename... LISTS>
+struct finalized_lli_group
+{
+    using base_type = lli_group<wiring_rules<>, LISTS...>;
+
+    base_type root;
+
+    constexpr finalized_lli_group() = default;
+
+    constexpr explicit finalized_lli_group(const base_type& value)
+        : root(value)
+    {
+    }
+
+    constexpr const base_type& data() const noexcept
+    {
+        return root;
+    }
+
+    constexpr base_type& data() noexcept
+    {
+        return root;
+    }
 };
 
 // チェーンの現在ノード型と、末尾かどうかを取得する
@@ -486,59 +656,46 @@ struct group_traits
     static constexpr std::size_t chain_count = 0;
 };
 
-template<>
-struct group_traits<lli_group<>>
+template<WiringRule... RULES>
+struct group_traits<lli_group<wiring_rules<RULES...>>>
 {
     static constexpr std::size_t chain_count = 0;
 };
 
-template<typename HEAD, typename... TAIL>
-struct group_traits<lli_group<HEAD, TAIL...>>
+template<WiringRule... RULES, typename HEAD, typename... TAIL>
+struct group_traits<lli_group<wiring_rules<RULES...>, HEAD, TAIL...>>
 {
     static constexpr std::size_t chain_count =
-        1 + group_traits<lli_group<TAIL...>>::chain_count;
+        1 + group_traits<lli_group<wiring_rules<>, TAIL...>>::chain_count;
 
-    using tail_type = lli_group<TAIL...>;
+    using tail_type = lli_group<wiring_rules<>, TAIL...>;
 };
 
-// ROOT内の位置をProgram/ListタグとList内ノード番号で表す。
-template<typename ProgramTag, typename ListTag, std::size_t NodeIndex>
-struct node_at
+template<typename... LISTS>
+struct group_traits<finalized_lli_group<LISTS...>>
+    : group_traits<lli_group<wiring_rules<>, LISTS...>>
 {
-    using program_tag = ProgramTag;
-    using list_tag = ListTag;
-
-    static constexpr std::size_t node_index = NodeIndex;
 };
 
-// Listの先頭または末尾を、Node番号に依存せずに表す。
-template<typename ProgramTag, typename ListTag>
-struct list_entry
-{
-    using program_tag = ProgramTag;
-    using list_tag = ListTag;
-};
-
-template<typename ProgramTag, typename ListTag>
-struct list_tail
-{
-    using program_tag = ProgramTag;
-    using list_tag = ListTag;
-};
-
-template<typename ProgramTag, typename ListTag, typename GROUP>
+template<typename GroupTag, typename ListTag, typename GROUP>
 struct group_list_index;
 
-template<typename ProgramTag, typename ListTag, typename HEAD, typename... TAIL>
+template<
+    typename GroupTag,
+    typename ListTag,
+    WiringRule... RULES,
+    typename HEAD,
+    typename... TAIL
+>
 struct group_list_index<
-    ProgramTag,
+    GroupTag,
     ListTag,
-    lli_group<HEAD, TAIL...>
+    lli_group<wiring_rules<RULES...>, HEAD, TAIL...>
 >
 {
 private:
     static constexpr bool matches =
-        std::is_same_v<ProgramTag, typename list_traits<HEAD>::program_tag> &&
+        std::is_same_v<GroupTag, typename list_traits<HEAD>::group_tag> &&
         std::is_same_v<ListTag, typename list_traits<HEAD>::list_tag>;
 
 public:
@@ -551,24 +708,33 @@ public:
         {
             return std::size_t{1} +
                 group_list_index<
-                    ProgramTag,
+                    GroupTag,
                     ListTag,
-                    lli_group<TAIL...>
+                    lli_group<wiring_rules<>, TAIL...>
                 >::value;
         }
     }();
 };
 
-template<typename ProgramTag, typename ListTag>
-struct group_list_index<ProgramTag, ListTag, lli_group<>>
+template<typename GroupTag, typename ListTag, WiringRule... RULES>
+struct group_list_index<GroupTag, ListTag, lli_group<wiring_rules<RULES...>>>
 {
     static constexpr std::size_t value = 0;
 };
 
-template<typename ProgramTag, typename ListTag, typename GROUP>
+template<typename GroupTag, typename ListTag, typename... LISTS>
+struct group_list_index<
+    GroupTag,
+    ListTag,
+    finalized_lli_group<LISTS...>
+> : group_list_index<GroupTag, ListTag, lli_group<wiring_rules<>, LISTS...>>
+{
+};
+
+template<typename GroupTag, typename ListTag, typename GROUP>
 inline constexpr bool group_has_list_v =
     group_list_index<
-        ProgramTag,
+        GroupTag,
         ListTag,
         std::remove_cvref_t<GROUP>
     >::value <
@@ -586,52 +752,58 @@ struct node_position_traits
 template<std::size_t Index, typename GROUP>
 struct group_chain_type;
 
-template<typename HEAD, typename... TAIL>
-struct group_chain_type<0, lli_group<HEAD, TAIL...>>
+template<WiringRule... RULES, typename HEAD, typename... TAIL>
+struct group_chain_type<0, lli_group<wiring_rules<RULES...>, HEAD, TAIL...>>
 {
     using type = typename list_traits<HEAD>::chain_type;
 };
 
-template<std::size_t Index, typename HEAD, typename... TAIL>
+template<std::size_t Index, WiringRule... RULES, typename HEAD, typename... TAIL>
     requires (Index > 0)
-struct group_chain_type<Index, lli_group<HEAD, TAIL...>>
-    : group_chain_type<Index - 1, lli_group<TAIL...>>
+struct group_chain_type<Index, lli_group<wiring_rules<RULES...>, HEAD, TAIL...>>
+    : group_chain_type<Index - 1, lli_group<wiring_rules<>, TAIL...>>
+{
+};
+
+template<std::size_t Index, typename... LISTS>
+struct group_chain_type<Index, finalized_lli_group<LISTS...>>
+    : group_chain_type<Index, lli_group<wiring_rules<>, LISTS...>>
 {
 };
 
 template<
-    typename ProgramTag,
+    typename GroupTag,
     typename ListTag,
     std::size_t NodeIndex,
     typename GROUP
 >
 struct node_position_traits<
-    node_at<ProgramTag, ListTag, NodeIndex>,
+    node_at<GroupTag, ListTag, NodeIndex>,
     GROUP
 >
 {
     static constexpr bool valid =
-        group_has_list_v<ProgramTag, ListTag, GROUP>;
+        group_has_list_v<GroupTag, ListTag, GROUP>;
     static constexpr std::size_t chain_index =
         group_list_index<
-            ProgramTag,
+            GroupTag,
             ListTag,
             std::remove_cvref_t<GROUP>
         >::value;
     static constexpr std::size_t node_index = NodeIndex;
 };
 
-template<typename ProgramTag, typename ListTag, typename GROUP>
+template<typename GroupTag, typename ListTag, typename GROUP>
 struct node_position_traits<
-    list_entry<ProgramTag, ListTag>,
+    list_entry<GroupTag, ListTag>,
     GROUP
 >
 {
     static constexpr bool valid =
-        group_has_list_v<ProgramTag, ListTag, GROUP>;
+        group_has_list_v<GroupTag, ListTag, GROUP>;
     static constexpr std::size_t chain_index =
         group_list_index<
-            ProgramTag,
+            GroupTag,
             ListTag,
             std::remove_cvref_t<GROUP>
         >::value;
@@ -657,17 +829,17 @@ struct list_tail_node_index<true, ChainIndex, GROUP>
         node_traits<chain_type>::size - 1;
 };
 
-template<typename ProgramTag, typename ListTag, typename GROUP>
+template<typename GroupTag, typename ListTag, typename GROUP>
 struct node_position_traits<
-    list_tail<ProgramTag, ListTag>,
+    list_tail<GroupTag, ListTag>,
     GROUP
 >
 {
     static constexpr bool valid =
-        group_has_list_v<ProgramTag, ListTag, GROUP>;
+        group_has_list_v<GroupTag, ListTag, GROUP>;
     static constexpr std::size_t chain_index =
         group_list_index<
-            ProgramTag,
+            GroupTag,
             ListTag,
             std::remove_cvref_t<GROUP>
         >::value;
@@ -709,9 +881,9 @@ concept ValidNodePosition =
     >;
 
 // 指定したチェーンの実体をROOTから取得する。
-template<std::size_t Index, typename HEAD, typename... TAIL>
+template<std::size_t Index, WiringRule... RULES, typename HEAD, typename... TAIL>
 constexpr decltype(auto) group_chain_at(
-    lli_group<HEAD, TAIL...>& group
+    lli_group<wiring_rules<RULES...>, HEAD, TAIL...>& group
 )
 {
     if constexpr (Index == 0)
@@ -724,9 +896,9 @@ constexpr decltype(auto) group_chain_at(
     }
 }
 
-template<std::size_t Index, typename HEAD, typename... TAIL>
+template<std::size_t Index, WiringRule... RULES, typename HEAD, typename... TAIL>
 constexpr decltype(auto) group_chain_at(
-    const lli_group<HEAD, TAIL...>& group
+    const lli_group<wiring_rules<RULES...>, HEAD, TAIL...>& group
 )
 {
     if constexpr (Index == 0)
@@ -737,6 +909,22 @@ constexpr decltype(auto) group_chain_at(
     {
         return group_chain_at<Index - 1>(group.tail);
     }
+}
+
+template<std::size_t Index, typename... LISTS>
+constexpr decltype(auto) group_chain_at(
+    finalized_lli_group<LISTS...>& group
+)
+{
+    return group_chain_at<Index>(group.root);
+}
+
+template<std::size_t Index, typename... LISTS>
+constexpr decltype(auto) group_chain_at(
+    const finalized_lli_group<LISTS...>& group
+)
+{
+    return group_chain_at<Index>(group.root);
 }
 
 // チェーン内の指定したノードを取得する。
@@ -771,10 +959,26 @@ constexpr decltype(auto) chain_node_at(
 }
 
 // 指定したチェーンの開始位置をROOT先頭からのオフセットで求める。
+template<typename GROUP>
+struct mutable_group_type
+{
+    using type = std::remove_cvref_t<GROUP>;
+};
+
+template<typename... LISTS>
+struct mutable_group_type<finalized_lli_group<LISTS...>>
+{
+    using type = lli_group<wiring_rules<>, LISTS...>;
+};
+
+template<typename GROUP>
+using mutable_group_type_t =
+    typename mutable_group_type<std::remove_cvref_t<GROUP>>::type;
+
 template<std::size_t Index, typename GROUP>
 constexpr std::size_t group_chain_offset()
 {
-    using group_t = std::remove_cvref_t<GROUP>;
+    using group_t = mutable_group_type_t<GROUP>;
 
     if constexpr (Index == 0)
     {
@@ -848,31 +1052,32 @@ constexpr std::size_t lli_offset()
 }
 
 // チェーン番号からLLI型とROOT基準のオフセットを求め、開始用CLLRを生成する。
-template<std::size_t Index, typename... CHAINS>
-    requires ValidGroupNode<Index, 0, lli_group<CHAINS...>>
+template<std::size_t Index, WiringRule... RULES, typename... CHAINS>
+    requires ValidGroupNode<Index, 0, lli_group<wiring_rules<RULES...>, CHAINS...>>
 constexpr uint32_t start_cllr(
-    const lli_group<CHAINS...>&
+    const lli_group<wiring_rules<RULES...>, CHAINS...>&
 )
 {
+    using group_t = lli_group<wiring_rules<RULES...>, CHAINS...>;
     using chain_t =
-        typename group_chain_type<Index, lli_group<CHAINS...>>::type;
+        typename group_chain_type<Index, group_t>::type;
     using lli_t = typename node_traits<chain_t>::current_type;
 
     return start_cllr<lli_t>(
         static_cast<uint32_t>(
-            lli_offset<Index, lli_group<CHAINS...>>()
+            lli_offset<Index, group_t>()
         )
     );
 }
 
 // node_atで指定した位置のLLI型とROOT基準オフセットから開始用CLLRを生成する。
-template<typename POSITION, typename... CHAINS>
-    requires ValidNodePosition<POSITION, lli_group<CHAINS...>>
+template<typename POSITION, typename ROOT>
+    requires ValidNodePosition<POSITION, std::remove_cvref_t<ROOT>>
 constexpr uint32_t start_cllr(
-    const lli_group<CHAINS...>&
+    const ROOT&
 )
 {
-    using root_t = lli_group<CHAINS...>;
+    using root_t = std::remove_cvref_t<ROOT>;
     using position_t = node_position_traits<POSITION, root_t>;
     using chain_t =
         typename group_chain_type<position_t::chain_index, root_t>::type;
@@ -905,6 +1110,7 @@ template<
     typename ROOT
 >
     requires (
+        is_finalized_lli_group_v<ROOT> &&
         supported_descriptor_executor_image_v<ExecutorImage> &&
         ValidNodePosition<SelectorPosition, std::remove_cvref_t<ROOT>> &&
         ValidNodePosition<ExecutorPosition, std::remove_cvref_t<ROOT>>
@@ -1042,14 +1248,15 @@ public:
 template<
     std::size_t ChainIndex,
     std::size_t NodeIndex,
+    WiringRule... RULES,
     typename... CHAINS
 >
 constexpr bool cllr_target_exists(
-    const lli_group<CHAINS...>& root,
+    const lli_group<wiring_rules<RULES...>, CHAINS...>& root,
     uint32_t cllr
 )
 {
-    using root_t = lli_group<CHAINS...>;
+    using root_t = lli_group<wiring_rules<RULES...>, CHAINS...>;
     using chain_t =
         typename group_chain_type<ChainIndex, root_t>::type;
     using node_t =
@@ -1087,9 +1294,9 @@ constexpr bool cllr_target_exists(
     }
 }
 
-template<typename... CHAINS>
+template<WiringRule... RULES, typename... CHAINS>
 constexpr bool valid_cllr_target(
-    const lli_group<CHAINS...>& root,
+    const lli_group<wiring_rules<RULES...>, CHAINS...>& root,
     uint32_t cllr
 )
 {
@@ -1108,13 +1315,14 @@ constexpr bool valid_cllr_target(
 template<
     std::size_t ChainIndex,
     std::size_t NodeIndex,
+    WiringRule... RULES,
     typename... CHAINS
 >
 constexpr bool chain_targets_valid(
-    const lli_group<CHAINS...>& root
+    const lli_group<wiring_rules<RULES...>, CHAINS...>& root
 )
 {
-    using root_t = lli_group<CHAINS...>;
+    using root_t = lli_group<wiring_rules<RULES...>, CHAINS...>;
     using chain_t =
         typename group_chain_type<ChainIndex, root_t>::type;
 
@@ -1152,16 +1360,15 @@ constexpr bool chain_targets_valid(
 }
 
 // ROOT内の全LLIのCLLRが終端か、有効なROOT内ノードを指すことを検証する。
-template<typename... LISTS>
+template<typename ROOT>
     requires (
-        sizeof...(LISTS) > 0 &&
-        (requires { typename list_traits<LISTS>::chain_type; } && ...)
+        group_traits<std::remove_cvref_t<ROOT>>::chain_count > 0
     )
 constexpr bool validate_root(
-    const lli_group<LISTS...>& root
+    const ROOT& root
 )
 {
-    using root_t = lli_group<LISTS...>;
+    using root_t = std::remove_cvref_t<ROOT>;
 
     if constexpr (
         !std::is_standard_layout_v<root_t> ||
@@ -1169,6 +1376,10 @@ constexpr bool validate_root(
     )
     {
         return false;
+    }
+    else if constexpr (is_finalized_lli_group_v<root_t>)
+    {
+        return chain_targets_valid<0, 0>(root.root);
     }
     else
     {
@@ -1187,15 +1398,15 @@ concept GPDMAChannel =
 // 本関数はチャネルを停止・開始しない。
 // CCR.EN == 1の場合、CLBAR/CLLRはロックされるため設定は反映されない。
 // 64KB境界配置はリンカ側で保証する。
-template<typename POSITION, GPDMAChannel CHANNEL, typename... CHAINS>
-    requires ValidNodePosition<POSITION, lli_group<CHAINS...>>
+template<typename POSITION, GPDMAChannel CHANNEL, typename... LISTS>
+    requires ValidNodePosition<POSITION, finalized_lli_group<LISTS...>>
 inline void load_lli(
     CHANNEL& channel,
-    const lli_group<CHAINS...>& root
+    const finalized_lli_group<LISTS...>& root
 )
 {
     const uintptr_t root_address =
-        reinterpret_cast<uintptr_t>(&root);
+        reinterpret_cast<uintptr_t>(&root.root);
 
     channel.CLBAR =
         static_cast<uint32_t>(root_address);
@@ -1274,17 +1485,54 @@ constexpr bool chain_links_valid(
     }
 }
 
-// 直線リンクをROOT内の任意のLLIへ向かうリンクに置き換える。
-// リンク先LLIの型から更新フラグを選び、ROOT基準のオフセットを設定する。
-template<typename FROM, typename TO, typename... CHAINS>
+template<typename RULE, typename GROUP>
+struct valid_wiring_rule : std::false_type
+{
+};
+
+template<typename FROM, typename TO, typename GROUP>
+struct valid_wiring_rule<jump<FROM, TO>, GROUP>
+    : std::bool_constant<
+        ValidNodePosition<FROM, std::remove_cvref_t<GROUP>> &&
+        ValidNodePosition<TO, std::remove_cvref_t<GROUP>>
+    >
+{
+};
+
+template<typename POSITION, typename GROUP>
+struct valid_wiring_rule<end_node<POSITION>, GROUP>
+    : std::bool_constant<
+        ValidNodePosition<POSITION, std::remove_cvref_t<GROUP>>
+    >
+{
+};
+
+template<typename RULES, typename GROUP>
+struct valid_wiring_rules : std::false_type
+{
+};
+
+template<WiringRule... RULES, typename GROUP>
+struct valid_wiring_rules<wiring_rules<RULES...>, GROUP>
+    : std::bool_constant<(valid_wiring_rule<RULES, GROUP>::value && ...)>
+{
+};
+
+template<typename RULES, typename GROUP>
+inline constexpr bool valid_wiring_rules_v =
+    valid_wiring_rules<RULES, GROUP>::value;
+
+// 宣言されたノード間ジャンプをROOT内オフセットへ解決する。
+template<typename FROM, typename TO, WiringRule... RULES, typename... CHAINS>
     requires
-        ValidNodePosition<FROM, lli_group<CHAINS...>> &&
-        ValidNodePosition<TO, lli_group<CHAINS...>>
-constexpr void patch_jump(
-    lli_group<CHAINS...>& root
+        ValidNodePosition<FROM, lli_group<wiring_rules<RULES...>, CHAINS...>> &&
+        ValidNodePosition<TO, lli_group<wiring_rules<RULES...>, CHAINS...>>
+constexpr void apply_wiring_rule(
+    lli_group<wiring_rules<RULES...>, CHAINS...>& root,
+    jump<FROM, TO>
 )
 {
-    using root_t = lli_group<CHAINS...>;
+    using root_t = lli_group<wiring_rules<RULES...>, CHAINS...>;
     using from_t = node_position_traits<FROM, root_t>;
     using to_t = node_position_traits<TO, root_t>;
 
@@ -1294,13 +1542,11 @@ constexpr void patch_jump(
             root_t
         >::type;
 
-    using target_node_t = std::remove_cvref_t<
-        decltype(
-            chain_node_at<to_t::node_index>(
-                group_chain_at<to_t::chain_index>(root)
-            )
-        )
-    >;
+    using target_node_t =
+        typename chain_node_type<
+            to_t::node_index,
+            target_chain_t
+        >::type;
 
     using target_lli_t =
         typename node_traits<target_node_t>::current_type;
@@ -1328,14 +1574,15 @@ constexpr void patch_jump(
     from_node.current.CLLR = target_cllr;
 }
 
-// 指定したLLIをリンク終端へ変更する。
-template<typename POSITION, typename... CHAINS>
-    requires ValidNodePosition<POSITION, lli_group<CHAINS...>>
-constexpr void patch_end(
-    lli_group<CHAINS...>& root
+// 宣言されたノード終端指定を適用する。
+template<typename POSITION, WiringRule... RULES, typename... CHAINS>
+    requires ValidNodePosition<POSITION, lli_group<wiring_rules<RULES...>, CHAINS...>>
+constexpr void apply_wiring_rule(
+    lli_group<wiring_rules<RULES...>, CHAINS...>& root,
+    end_node<POSITION>
 )
 {
-    using root_t = lli_group<CHAINS...>;
+    using root_t = lli_group<wiring_rules<RULES...>, CHAINS...>;
     using position_t = node_position_traits<POSITION, root_t>;
 
     auto& node = chain_node_at<position_t::node_index>(
@@ -1344,35 +1591,45 @@ constexpr void patch_end(
     node.current.CLLR = 0;
 }
 
+template<typename Group, WiringRule... RULES>
+constexpr void apply_wiring_rules(
+    Group& root,
+    wiring_rules<RULES...>
+)
+{
+    (apply_wiring_rule(root, RULES{}), ...);
+}
+
 // チェーンがなくなったら再帰を終了する
+template<WiringRule... RULES>
 constexpr void fixup_group(
-    lli_group<>&,
+    lli_group<wiring_rules<RULES...>>&,
     uint32_t
 )
 {
 }
 
-template<typename HEAD>
-constexpr void connect_program_lists(
-    lli_group<HEAD>&,
+template<WiringRule... RULES, typename HEAD>
+constexpr void connect_group_lists(
+    lli_group<wiring_rules<RULES...>, HEAD>&,
     uint32_t
 )
 {
 }
 
-template<typename HEAD, typename NEXT, typename... TAIL>
-constexpr void connect_program_lists(
-    lli_group<HEAD, NEXT, TAIL...>& group,
+template<WiringRule... RULES, typename HEAD, typename NEXT, typename... TAIL>
+constexpr void connect_group_lists(
+    lli_group<wiring_rules<RULES...>, HEAD, NEXT, TAIL...>& group,
     uint32_t base_offset
 )
 {
-    using group_t = lli_group<HEAD, NEXT, TAIL...>;
-    using tail_group_t = lli_group<NEXT, TAIL...>;
+    using group_t = lli_group<wiring_rules<RULES...>, HEAD, NEXT, TAIL...>;
+    using tail_group_t = lli_group<wiring_rules<>, NEXT, TAIL...>;
 
     if constexpr (
         std::is_same_v<
-            typename list_traits<HEAD>::program_tag,
-            typename list_traits<NEXT>::program_tag
+            typename list_traits<HEAD>::group_tag,
+            typename list_traits<NEXT>::group_tag
         > &&
         !list_traits<HEAD>::explicit_end
     )
@@ -1392,18 +1649,20 @@ constexpr void connect_program_lists(
             start_cllr<next_lli_t>(next_chain_offset);
     }
 
-    connect_program_lists(
+    connect_group_lists(
         group.tail,
         base_offset + offsetof(group_t, tail)
     );
 }
 
 template<
+    WiringRule... RULES,
     typename HEAD,
     typename... TAIL
 >
 constexpr void fixup_group(
     lli_group<
+        wiring_rules<RULES...>,
         HEAD,
         TAIL...
     >& group,
@@ -1412,6 +1671,7 @@ constexpr void fixup_group(
 {
     using group_t =
         lli_group<
+            wiring_rules<RULES...>,
             HEAD,
             TAIL...
         >;
@@ -1439,13 +1699,16 @@ constexpr void fixup_group(
 }
 
 // lli_groupをList列へ戻す。連結後はROOT全体を再構築し、CLLRを再計算する。
-constexpr auto group_lists(const lli_group<>&)
+template<WiringRule... RULES>
+constexpr auto group_lists(const lli_group<wiring_rules<RULES...>>&)
 {
     return std::tuple{};
 }
 
-template<typename HEAD, typename... TAIL>
-constexpr auto group_lists(const lli_group<HEAD, TAIL...>& group)
+template<WiringRule... RULES, typename HEAD, typename... TAIL>
+constexpr auto group_lists(
+    const lli_group<wiring_rules<RULES...>, HEAD, TAIL...>& group
+)
 {
     return std::tuple_cat(
         std::tuple{group.head},
@@ -1453,25 +1716,19 @@ constexpr auto group_lists(const lli_group<HEAD, TAIL...>& group)
     );
 }
 
-template<bool instantiated, typename... LISTS>
-constexpr auto group_lists(const lli_program<instantiated, LISTS...>& program)
-{
-    return group_lists(program.lists);
-}
-
 template<
     typename InstanceTag,
-    typename ProgramTag,
+    typename GroupTag,
     typename ListTag,
     typename Chain,
     bool ExplicitEnd
 >
 constexpr auto instantiate_list(
-    const lli_list<ProgramTag, ListTag, Chain, ExplicitEnd>& list
+    const lli_list<GroupTag, ListTag, Chain, ExplicitEnd>& list
 )
 {
     using instanced_list_t = lli_list<
-        instanced_tag<InstanceTag, ProgramTag>,
+        instanced_tag<InstanceTag, GroupTag>,
         ListTag,
         Chain,
         ExplicitEnd
@@ -1480,75 +1737,161 @@ constexpr auto instantiate_list(
     return instanced_list_t{list.chain};
 }
 
-template<typename InstanceTag, typename... LISTS>
-constexpr auto instantiate_lists(const lli_group<LISTS...>& group)
+template<typename InstanceTag, typename Position>
+struct instantiate_position;
+
+template<typename InstanceTag, typename GroupTag, typename ListTag, std::size_t NodeIndex>
+struct instantiate_position<InstanceTag, node_at<GroupTag, ListTag, NodeIndex>>
 {
-    return std::apply(
-        []<typename... SOURCE_LISTS>(SOURCE_LISTS... lists)
-        {
-            return lli_program<
-                true,
-                decltype(instantiate_list<InstanceTag>(lists))...
-            >{
-                lli_group<decltype(instantiate_list<InstanceTag>(lists))...>{
-                    instantiate_list<InstanceTag>(lists)...
-                }
-            };
-        },
-        group_lists(group)
-    );
+    using type = node_at<instanced_tag<InstanceTag, GroupTag>, ListTag, NodeIndex>;
+};
+
+template<typename InstanceTag, typename GroupTag, typename ListTag>
+struct instantiate_position<InstanceTag, list_entry<GroupTag, ListTag>>
+{
+    using type = list_entry<instanced_tag<InstanceTag, GroupTag>, ListTag>;
+};
+
+template<typename InstanceTag, typename GroupTag, typename ListTag>
+struct instantiate_position<InstanceTag, list_tail<GroupTag, ListTag>>
+{
+    using type = list_tail<instanced_tag<InstanceTag, GroupTag>, ListTag>;
+};
+
+template<typename InstanceTag, typename Position>
+using instantiate_position_t =
+    typename instantiate_position<InstanceTag, Position>::type;
+
+template<typename InstanceTag, typename Rule>
+struct instantiate_rule;
+
+template<typename InstanceTag, typename From, typename To>
+struct instantiate_rule<InstanceTag, jump<From, To>>
+{
+    using type = jump<
+        instantiate_position_t<InstanceTag, From>,
+        instantiate_position_t<InstanceTag, To>
+    >;
+};
+
+template<typename InstanceTag, typename Position>
+struct instantiate_rule<InstanceTag, end_node<Position>>
+{
+    using type = end_node<
+        instantiate_position_t<InstanceTag, Position>
+    >;
+};
+
+template<typename InstanceTag, typename Rule>
+using instantiate_rule_t =
+    typename instantiate_rule<InstanceTag, Rule>::type;
+
+template<typename InstanceTag, typename Rules>
+struct instantiate_rules;
+
+template<typename InstanceTag, WiringRule... RULES>
+struct instantiate_rules<InstanceTag, wiring_rules<RULES...>>
+{
+    using type = wiring_rules<instantiate_rule_t<InstanceTag, RULES>...>;
+};
+
+template<typename InstanceTag, typename Rules>
+using instantiate_rules_t =
+    typename instantiate_rules<InstanceTag, Rules>::type;
+
+template<typename T>
+struct is_lli_list : std::false_type
+{
+};
+
+template<typename GroupTag, typename ListTag, typename Chain, bool ExplicitEnd>
+struct is_lli_list<lli_list<GroupTag, ListTag, Chain, ExplicitEnd>>
+    : std::true_type
+{
+};
+
+template<typename T>
+inline constexpr bool is_lli_list_v =
+    is_lli_list<std::remove_cvref_t<T>>::value;
+
+template<typename T>
+struct is_mutable_lli_group : std::false_type
+{
+};
+
+template<WiringRule... RULES, typename HEAD, typename... TAIL>
+struct is_mutable_lli_group<lli_group<wiring_rules<RULES...>, HEAD, TAIL...>>
+    : std::true_type
+{
+};
+
+template<typename T>
+inline constexpr bool is_mutable_lli_group_v =
+    is_mutable_lli_group<std::remove_cvref_t<T>>::value;
+
+template<typename T>
+concept GroupBuildPart =
+    is_lli_list_v<T> ||
+    is_mutable_lli_group_v<T>;
+
+template<typename T>
+struct item_inner_rules
+{
+    using type = wiring_rules<>;
+};
+
+template<WiringRule... RULES, typename HEAD, typename... TAIL>
+struct item_inner_rules<lli_group<wiring_rules<RULES...>, HEAD, TAIL...>>
+{
+    using type = wiring_rules<RULES...>;
+};
+
+template<typename T>
+using item_inner_rules_t =
+    typename item_inner_rules<std::remove_cvref_t<T>>::type;
+
+template<typename T>
+struct item_outer_rules
+{
+    using type = wiring_rules<>;
+};
+
+template<WiringRule RULE>
+struct item_outer_rules<RULE>
+{
+    using type = wiring_rules<RULE>;
+};
+
+template<typename T>
+using item_outer_rules_t =
+    typename item_outer_rules<std::remove_cvref_t<T>>::type;
+
+template<typename T>
+constexpr auto collect_build_lists(const T& item)
+{
+    if constexpr (is_lli_list_v<T>)
+    {
+        return std::tuple{item};
+    }
+    else if constexpr (is_mutable_lli_group_v<T>)
+    {
+        return group_lists(item);
+    }
+    else
+    {
+        return std::tuple{};
+    }
 }
 
-// 未instantiateのProgram、または完成済みROOTだけに新しいインスタンスタグを付ける。
-template<typename InstanceTag, typename... LISTS>
-constexpr auto instantiate(const lli_program<false, LISTS...>& program)
+// チェーンをグループに格納し、各CLLRをROOT基準の位置で設定した後、配線ルールを適用する。
+template<typename CombinedRules, typename... LISTS>
+constexpr auto build_lli_group_from_lists(const LISTS&... lists)
 {
-    return instantiate_lists<InstanceTag>(program.lists);
-}
-
-template<typename InstanceTag, typename... LISTS>
-constexpr auto instantiate(const lli_group<LISTS...>& root)
-{
-    return instantiate_lists<InstanceTag>(root);
-}
-
-// List列をプログラム単位で保持する。ROOTとしてのfixupは行わない。
-template<typename... LISTS>
-    requires (
-        sizeof...(LISTS) > 0 &&
-        (requires { typename list_traits<LISTS>::chain_type; } && ...)
-    )
-constexpr auto make_lli_program(LISTS... lists)
-{
-    using first_list_t = std::tuple_element_t<0, std::tuple<LISTS...>>;
-    using program_tag_t = typename list_traits<first_list_t>::program_tag;
+    using root_t = lli_group<CombinedRules, LISTS...>;
 
     static_assert(
-        (std::is_same_v<
-            program_tag_t,
-            typename list_traits<LISTS>::program_tag
-        > && ...),
-        "All Lists in one Program must have the same ProgramTag"
-    );
-
-    return lli_program<false, LISTS...>{
-        lli_group<LISTS...>{lists...}
-    };
-}
-
-// チェーンをグループに格納し、各CLLRをROOT基準の位置で設定する。
-template<typename... LISTS>
-    requires (
-        sizeof...(LISTS) > 0 &&
-        (requires { typename list_traits<LISTS>::chain_type; } && ...)
-    )
-constexpr auto make_lli_group(LISTS... lists)
-{
-    using root_t = lli_group<LISTS...>;
-
-    static_assert(
-        unique_program_list_tags_v<LISTS...>,
-        "ProgramTag/ListTag pair must be unique in one ROOT"
+        unique_group_list_tags_v<LISTS...>,
+        "GroupTag/ListTag pair must be unique in one ROOT"
     );
     static_assert(
         std::is_standard_layout_v<root_t>,
@@ -1559,10 +1902,26 @@ constexpr auto make_lli_group(LISTS... lists)
         "LLI group must fit within the 16-bit CLLR.LA offset range"
     );
 
-    auto root = root_t{lists...};
+    if constexpr (unique_group_list_tags_v<LISTS...>)
+    {
+        static_assert(
+            valid_wiring_rules_v<CombinedRules, root_t>,
+            "Wiring rule target position must exist in one ROOT"
+        );
+    }
+
+    auto root = make_raw_lli_group<CombinedRules>(lists...);
 
     fixup_group(root, 0);
-    connect_program_lists(root, 0);
+    connect_group_lists(root, 0);
+
+    if constexpr (
+        unique_group_list_tags_v<LISTS...> &&
+        valid_wiring_rules_v<CombinedRules, root_t>
+    )
+    {
+        apply_wiring_rules(root, CombinedRules{});
+    }
 
     // 定数評価中に不整合があればコンパイルエラーにする。
     // 実行時生成でも不整合を検出できるよう、失敗時は停止する。
@@ -1574,28 +1933,89 @@ constexpr auto make_lli_group(LISTS... lists)
     return root;
 }
 
-// プログラム、または完成済みROOTを末尾方向に平坦化して一つのROOTにする。
-template<typename... GROUPS>
-    requires (
-        sizeof...(GROUPS) > 0 &&
-        (requires(GROUPS group) { group_lists(group); } && ...)
-    )
-constexpr auto make_lli_group(GROUPS... groups)
+// 未finalizeのGroupに新しいインスタンスタグを付け、配線ルールも変換した新しいGroupを返す。
+template<typename InstanceTag, WiringRule... RULES, typename HEAD, typename... TAIL>
+[[nodiscard]]
+constexpr auto instantiate(
+    const lli_group<wiring_rules<RULES...>, HEAD, TAIL...>& group
+)
 {
+    using instanced_rules_t =
+        instantiate_rules_t<InstanceTag, wiring_rules<RULES...>>;
+
     return std::apply(
-        []<typename... LISTS>(LISTS... lists)
+        []<typename... SOURCE_LISTS>(const SOURCE_LISTS&... lists)
         {
-            return make_lli_group(lists...);
+            return build_lli_group_from_lists<instanced_rules_t>(
+                instantiate_list<InstanceTag>(lists)...
+            );
         },
-        std::tuple_cat(group_lists(groups)...)
+        group_lists(group)
     );
 }
 
-template<typename... LEFT, typename... RIGHT>
-constexpr auto append_lli_group(
-    const lli_group<LEFT...>& left,
-    const lli_group<RIGHT...>& right
+// List、未finalize Group、および配線ルールを統合して一つのGroupにする。
+template<typename... ITEMS>
+    requires (
+        ((GroupBuildPart<ITEMS> || WiringRule<ITEMS>) && ...) &&
+        (GroupBuildPart<ITEMS> || ...)
+    )
+constexpr auto make_lli_group(const ITEMS&... items)
+{
+    using inner_rules_t = concat_wiring_rules_t<item_inner_rules_t<ITEMS>...>;
+    using outer_rules_t = concat_wiring_rules_t<item_outer_rules_t<ITEMS>...>;
+    using combined_rules_t = concat_wiring_rules_t<inner_rules_t, outer_rules_t>;
+
+    return std::apply(
+        []<typename... LISTS>(const LISTS&... lists)
+        {
+            return build_lli_group_from_lists<combined_rules_t>(lists...);
+        },
+        std::tuple_cat(collect_build_lists(items)...)
+    );
+}
+
+// 妥当性確認済みのROOTへ型を変え、配線ルール型を外してdescriptor/DMA APIへ渡せる状態にする。
+template<WiringRule... RULES, typename HEAD, typename... TAIL>
+[[nodiscard]]
+constexpr auto finalize_lli_group(
+    const lli_group<wiring_rules<RULES...>, HEAD, TAIL...>& root
 )
 {
-    return make_lli_group(left, right);
+    using raw_group_t = lli_group<wiring_rules<>, HEAD, TAIL...>;
+    using finalized_t = finalized_lli_group<HEAD, TAIL...>;
+
+    static_assert(
+        sizeof(finalized_t) == sizeof(lli_group<wiring_rules<RULES...>, HEAD, TAIL...>),
+        "finalized_lli_group must match lli_group size"
+    );
+    static_assert(
+        offsetof(finalized_t, root) == 0,
+        "finalized_lli_group root member must start at offset 0"
+    );
+
+    if (!validate_root(root))
+    {
+        __builtin_trap();
+    }
+
+    return finalized_t{raw_group_t{root.head, root.tail}};
+}
+
+template<
+    WiringRule... LEFT_RULES,
+    typename LEFT_HEAD,
+    typename... LEFT_TAIL,
+    WiringRule... RIGHT_RULES,
+    typename RIGHT_HEAD,
+    typename... RIGHT_TAIL,
+    WiringRule... RULES
+>
+constexpr auto append_lli_group(
+    const lli_group<wiring_rules<LEFT_RULES...>, LEFT_HEAD, LEFT_TAIL...>& left,
+    const lli_group<wiring_rules<RIGHT_RULES...>, RIGHT_HEAD, RIGHT_TAIL...>& right,
+    RULES... rules
+)
+{
+    return make_lli_group(left, right, rules...);
 }
